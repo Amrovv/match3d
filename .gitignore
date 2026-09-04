@@ -1,4 +1,16 @@
 notes/
 ClaudeReadme_1.md
 matchmaking-project-guide.md
-PULL_REQUEST_TEMPLATE.md
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+out/
+.vscode/
+
+.gitignore
