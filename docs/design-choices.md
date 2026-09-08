@@ -96,6 +96,14 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 
 **Cost.** Harder to reason about at a glance than a line, and the constants are defensible rather than derived. There is no player behaviour data behind them.
 
+### A queue time in the future counts as no wait
+
+**Options.** Let the widening function's rejection of a negative wait propagate, or clamp at the matcher.
+
+**Chosen.** Clamp at the matcher. Intake stamps the queue time on one machine and the engine reads it on another, so modest clock skew puts a freshly joined player slightly ahead of now. That is the same player state as a wait of zero, and crashing on it would make the engine hostage to two clocks agreeing. The widening function still rejects a negative wait, since reaching it means a caller computed one rather than a clock disagreeing.
+
+**Cost.** A skewed clock is silently absorbed rather than surfaced, so a badly wrong clock looks like a queue full of new arrivals. Nothing measures skew yet.
+
 ### No clock inside the engine
 
 **Options.** Read a clock where it is needed, or take the current instant as a parameter throughout.
