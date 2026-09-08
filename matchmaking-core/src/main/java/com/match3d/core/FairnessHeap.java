@@ -1,6 +1,5 @@
 package com.match3d.core;
 
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -20,9 +19,6 @@ import java.util.UUID;
 public final class FairnessHeap {
 
     private static final int INITIAL_CAPACITY = 16;
-
-    private static final Comparator<Player> BY_WAIT_TIME =
-            Comparator.comparing(Player::queuedAt).thenComparing(Player::id);
 
     private Player[] heap = new Player[INITIAL_CAPACITY];
     private final Map<UUID, Integer> positions = new HashMap<>();
@@ -116,7 +112,7 @@ public final class FairnessHeap {
      * Moves the player at index up until their parent waits at least as long.
      */
     private void siftUp(int index) {
-        while (index != 0 && (BY_WAIT_TIME.compare(heap[index], heap[parent(index)]) < 0)){
+        while (index != 0 && (Player.BY_WAIT_TIME.compare(heap[index], heap[parent(index)]) < 0)){
             swap(index, parent(index));
             index = parent(index);
         }
@@ -130,10 +126,10 @@ public final class FairnessHeap {
         int r = right(index);
 
         int smallest = index;
-        if (l < size && BY_WAIT_TIME.compare(heap[l], heap[smallest]) < 0) {
+        if (l < size && Player.BY_WAIT_TIME.compare(heap[l], heap[smallest]) < 0) {
             smallest = l;
         }
-        if (r < size && BY_WAIT_TIME.compare(heap[r], heap[smallest]) < 0) {
+        if (r < size && Player.BY_WAIT_TIME.compare(heap[r], heap[smallest]) < 0) {
             smallest = r;
         }
 

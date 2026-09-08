@@ -1,5 +1,6 @@
 package com.match3d.core;
 
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.NavigableMap;
 import java.util.Set;
@@ -41,26 +42,36 @@ public final class SkillIndex {
      * Returns false if the player was not queued at that rating.
      */
     public boolean remove(Player player) {
-        Set<Player> bucket = byRating.get(player.rating());
-        if (bucket == null) return false;
-        boolean removed = bucket.remove(player);
-        if (removed) playerSize--;
-        if (bucket.isEmpty()) byRating.remove(player.rating());
-        return removed;
+        boolean[] removed = {false};
+        byRating.computeIfPresent(player.rating(), (rating, bucket) -> {
+            removed[0] = bucket.remove(player);
+            return bucket.isEmpty() ? null : bucket;
+        });
+        if (removed[0]) playerSize--;
+        return removed[0];
     }
 
     /**
-     * Every queued player rated between low and high, both bounds inclusive.
+     * Every queued player rated between low and high, both bounds inclusive,
+     * still in buckets so the matcher can merge across them for wait time order.
      *
-     * Lazy. A window can hold thousands of candidates when a lobby needs nine,
-     * so nothing is materialised and the caller can stop early.
+     * Ordered by rating, and within a bucket by wait time, longest first.
      *
-     * Ordered by rating, and within a rating by wait time, longest first.
+     * A stream rather than a list, so nothing is built that the caller does not
+     * ask for. A mid distribution window can hold thousands of players when a
+     * lobby seats ten, and a list would materialise all of them to hand back
+     * ten. The caller pulls only as far as it needs and the rest are never
+     * touched.
+     *
+     * Lazy, and the buckets are live unmodifiable views rather than copies, so
+     * the caller must finish drawing before mutating the index.
      */
-    public Stream<Player> playersInRange(int low, int high) {
-        return byRating.subMap(low, true, high, true).values().stream().flatMap(Set::stream);
+    public Stream<Set<Player>> playersInRange(int low, int high) {
+        return byRating.subMap(low, true, high, true).values().stream()
+                       .map(Collections::unmodifiableSet);
     }
 
+    
     /**
      * The number of players currently queued, across all ratings.
      */

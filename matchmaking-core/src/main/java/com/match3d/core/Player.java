@@ -3,6 +3,7 @@ package com.match3d.core;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.Comparator;
 
 /**
  * A player waiting in the queue.
@@ -16,6 +17,9 @@ public record Player(UUID id, int rating, Instant queuedAt) {
         Objects.requireNonNull(queuedAt, "queuedAt");
     }
 
+    static final Comparator<Player> BY_WAIT_TIME =
+            Comparator.comparing(Player::queuedAt).thenComparing(Player::id);
+
     @Override
     public boolean equals(Object o) {
         if (o instanceof Player other) {
@@ -28,4 +32,5 @@ public record Player(UUID id, int rating, Instant queuedAt) {
     public int hashCode() {
         return id.hashCode();
     }
+
 }

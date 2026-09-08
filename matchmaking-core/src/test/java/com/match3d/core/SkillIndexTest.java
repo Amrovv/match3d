@@ -1,7 +1,9 @@
 package com.match3d.core;
 
 import java.time.Instant;
+import java.util.ConcurrentModificationException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -33,8 +35,9 @@ class SkillIndexTest {
         return new Player(id, rating, BASE.plusSeconds(tick++));
     }
 
+    /** The window flattened back to players, for the cases that only care about members. */
     private List<Player> range(int low, int high) {
-        return index.playersInRange(low, high).toList();
+        return index.playersInRange(low, high).flatMap(Set::stream).toList();
     }
 
     // insert
@@ -198,6 +201,7 @@ class SkillIndexTest {
 
         AtomicInteger pulled = new AtomicInteger();
         List<Player> taken = index.playersInRange(1000, 1049)
+                                  .flatMap(Set::stream)
                                   .peek(p -> pulled.incrementAndGet())
                                   .limit(2)
                                   .toList();
@@ -209,6 +213,63 @@ class SkillIndexTest {
     @Test void testRangeInvertedWindow() {
         assertThrows(IllegalArgumentException.class, () -> index.playersInRange(1500, 1000),
                 "An inverted window is a caller bug, not an empty result");
+    }
+
+    @Test void testRangeYieldsOneBucketPerOccupiedRating() {
+        index.insert(player(1000));
+        index.insert(player(1000));
+        index.insert(player(1002));
+
+        List<Set<Player>> buckets = index.playersInRange(1000, 1002).toList();
+
+        assertEquals(2, buckets.size(), "Two ratings are occupied, so two buckets come back");
+        assertEquals(2, buckets.get(0).size(), "The first bucket holds both players at 1000");
+        assertEquals(1, buckets.get(1).size(), "The second holds the lone player at 1002");
+    }
+
+    @Test void testRangeNeverYieldsAnEmptyBucket() {
+        Player only = player(1000);
+        index.insert(only);
+        index.insert(player(1002));
+        index.remove(only);
+
+        assertTrue(index.playersInRange(0, 5000).noneMatch(Set::isEmpty),
+                "A bucket exists only while it holds a player, so none can come back empty");
+    }
+
+    @Test void testRangeBucketsAreUnmodifiableNeg() {
+        index.insert(player(1000));
+        Set<Player> bucket = index.playersInRange(1000, 1000).findFirst().orElseThrow();
+
+        assertThrows(UnsupportedOperationException.class, () -> bucket.add(player(1000)),
+                "A bucket handed out is a view, not a way into the index");
+    }
+
+    @Test void testRangeIsLazyWithinOneBucket() {
+        for (int i = 0; i < 5000; i++) {
+            index.insert(player(1000));
+        }
+
+        AtomicInteger pulled = new AtomicInteger();
+        List<Player> taken = index.playersInRange(1000, 1000)
+                                  .flatMap(Set::stream)
+                                  .peek(p -> pulled.incrementAndGet())
+                                  .limit(2)
+                                  .toList();
+
+        assertEquals(2, taken.size(), "Only two players were asked for");
+        assertEquals(2, pulled.get(),
+                "One fat bucket must not be walked to its end, the matcher relies on stopping early");
+    }
+
+    @Test void testRangeThrowsIfTheIndexIsMutatedMidDrawNeg() {
+        for (int rating = 1000; rating < 1010; rating++) {
+            index.insert(player(rating));
+        }
+
+        assertThrows(ConcurrentModificationException.class,
+                () -> index.playersInRange(1000, 1009).flatMap(Set::stream).forEach(index::remove),
+                "The window is a live view, so the caller must finish drawing before it mutates");
     }
 
     // counters
@@ -229,7 +290,7 @@ class SkillIndexTest {
 
         assertEquals(2, index.playerCount(), "Only a and c remain");
         assertEquals(2, index.ratingCount(), "Ratings 1000 and 2000 are occupied");
-        assertEquals(index.playersInRange(Integer.MIN_VALUE, Integer.MAX_VALUE).count(),
+        assertEquals(index.playersInRange(Integer.MIN_VALUE, Integer.MAX_VALUE).flatMap(Set::stream).count(),
                 index.playerCount(), "The counter must not drift from what the buckets actually hold");
     }
 }
