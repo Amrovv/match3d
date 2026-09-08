@@ -50,6 +50,24 @@ class MatchMakerTest {
         return joined;
     }
 
+    /**
+     * Nine players spread across nine ratings around 1500, none of them the
+     * anchor's own rating, all waiting less than the anchor.
+     *
+     * The spread is 1480 to 1525, and the shortest wait here is ten seconds,
+     * which buys a radius of 84. Every one of them therefore reaches both ends
+     * of that spread, so the lobby is valid without depending on the anchor's
+     * much wider window.
+     */
+    private List<Player> joinSpread() {
+        int[] ratings = {1480, 1485, 1490, 1495, 1505, 1510, 1515, 1520, 1525};
+        List<Player> joined = new ArrayList<>();
+        for (int i = 0; i < ratings.length; i++) {
+            joined.add(join(ratings[i], 90 - i * 10));
+        }
+        return joined;
+    }
+
     // nobody to match
 
     @Test void testEmptyQueueFormsNothing() {
@@ -93,6 +111,58 @@ class MatchMakerTest {
         assertTrue(matcher.formLobby(NOW).isPresent(), "Fifteen candidates are more than enough");
         assertEquals(5, index.playerCount(), "One attempt seats ten, it does not drain the queue");
         assertEquals(5, heap.size(), "The heap keeps the five who were not seated");
+    }
+
+    @Test void testFormsALobbyAcrossSeveralRatingsPos() {
+        Player anchor = join(1500, 300);
+        joinSpread();
+
+        Lobby formed = matcher.formLobby(NOW).orElseThrow();
+
+        Set<Integer> ratings = new HashSet<>();
+        formed.members().forEach(member -> ratings.add(member.rating()));
+
+        assertEquals(MatchMaker.LOBBY_SIZE, formed.members().size(), "A lobby is exactly ten players");
+        assertEquals(anchor, formed.anchor(), "The longest waiter anchors");
+        assertEquals(MatchMaker.LOBBY_SIZE, ratings.size(),
+                "Ten distinct ratings, so the lobby was merged out of ten separate buckets"
+                        + " rather than lifted from one");
+    }
+
+    @Test void testEveryMemberOfASpreadLobbyReachesEveryOtherPos() {
+        join(1500, 300);
+        joinSpread();
+
+        List<Player> members = matcher.formLobby(NOW).orElseThrow().members();
+
+        int lowest = members.stream().mapToInt(Player::rating).min().orElseThrow();
+        int highest = members.stream().mapToInt(Player::rating).max().orElseThrow();
+
+        for (Player member : members) {
+            int radius = WideningFunction.ratingRadius(java.time.Duration.between(member.queuedAt(), NOW));
+            assertTrue(member.rating() - radius <= lowest && member.rating() + radius >= highest,
+                    "Player rated " + member.rating() + " accepts a radius of " + radius
+                            + ", which must cover the whole lobby span " + lowest + " to " + highest);
+        }
+    }
+
+    @Test void testACandidateWhoCannotReachBackIsSkippedButTheLobbyStillFormsNeg() {
+        // The outsider sits inside the anchor's window, so the query returns
+        // them and a one sided check would seat them. Their own radius reaches
+        // nowhere near 1500. They have also waited longer than the nine, so the
+        // merge offers them first and the rejection has to happen mid walk
+        // rather than at the end.
+        join(1500, 300);
+        Player outsider = join(2300, 95);
+        joinSpread();
+
+        Lobby formed = matcher.formLobby(NOW).orElseThrow();
+
+        assertEquals(MatchMaker.LOBBY_SIZE, formed.members().size(),
+                "Rejecting a candidate does not cost a seat, the walk carries on");
+        assertFalse(formed.members().contains(outsider),
+                "The outsider accepts nobody in this lobby, so they cannot be seated in it");
+        assertTrue(heap.contains(outsider.id()), "A skipped candidate is still queued");
     }
 
     // committing a lobby
@@ -209,6 +279,27 @@ class MatchMakerTest {
                 "The cooldown has expired, but the player is in a lobby and must not be drained back");
         assertFalse(index.playersInRange(0, 5000).anyMatch(b -> b.contains(failedAnchor)),
                 "Nor are they still queued by rating");
+    }
+
+    // clock skew
+
+    @Test void testAQueueTimeInTheFutureIsTreatedAsNoWait() {
+        // intake stamps the queue time on one machine, the engine reads it on
+        // another. Skew puts a player who has just joined slightly ahead of now.
+        joinCluster(1000, 9);
+        join(1000, -30);
+
+        assertTrue(matcher.formLobby(NOW).isPresent(),
+                "A player from a slightly fast clock is matchable, not a crash");
+    }
+
+    @Test void testAnAnchorWithAQueueTimeInTheFutureStillAnchors() {
+        for (int i = 0; i < 10; i++) {
+            join(1000, -30 - i);
+        }
+
+        assertTrue(matcher.formLobby(NOW).isPresent(),
+                "Every queue time is ahead of now, so the anchor is too, and it still matches");
     }
 
     // fairness

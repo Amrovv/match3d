@@ -100,6 +100,11 @@ public final class MatchMaker {
 
         // Bounds who is worth looking at, while Overlap decides who is taken.
         // Kept apart from the overlap values, which start here and then move.
+        //
+        // The window is exactly the anchor's own reach, so it excludes only
+        // candidates Overlap would reject anyway. It is an optimisation, not a
+        // filter, and no test can pin it: widening it to the whole domain
+        // changes cost and nothing else.
         int windowLow = anchor.rating() - anchorRadius;
         int windowHigh = anchor.rating() + anchorRadius;
 
@@ -126,9 +131,17 @@ public final class MatchMaker {
 
     /**
      * The rating radius a player accepts, given how long they have waited.
+     *
+     * A queue time later than now is treated as no wait at all, rather than
+     * thrown. The two are the same player state, someone who has just joined,
+     * and once intake stamps the queue time on one machine and the engine reads
+     * it on another, modest clock skew puts a fresh player slightly in the
+     * future. The widening function still rejects a negative wait, because
+     * there it is a programming error rather than a clock disagreement.
      */
     private static int radiusOf(Player player, Instant now) {
-        return WideningFunction.ratingRadius(Duration.between(player.queuedAt(), now));
+        Duration waited = Duration.between(player.queuedAt(), now);
+        return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
     }
 
     /**
