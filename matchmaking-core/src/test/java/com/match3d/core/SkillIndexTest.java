@@ -124,6 +124,13 @@ class SkillIndexTest {
         assertEquals(0, index.playerCount(), "The player is no longer queued");
     }
 
+    @Test void testRemoveByIdNeg() {
+        index.insert(player(1000));
+
+        assertFalse(index.remove(UUID.randomUUID()), "An id that never queued cannot be removed");
+        assertEquals(1, index.playerCount(), "A failed remove must not change the count");
+    }
+
     @Test void testRemoveIgnoresAStaleRating() {
         UUID id = UUID.randomUUID();
         index.insert(player(id, 1000));
@@ -227,6 +234,22 @@ class SkillIndexTest {
 
         assertEquals(List.of(first, second, third), range(1000, 1000),
                 "Within one rating, the longest waiting player comes first");
+    }
+
+    @Test void testRangeOrdersOutOfOrderArrivalsByWaitTime() {
+        // Arrivals are chronological in practice, so insertion order and wait
+        // time order usually agree and a bucket that merely preserved arrival
+        // order would pass every other ordering test. Inserting out of order is
+        // the only way to tell the two apart.
+        Player first = player(1000);
+        Player second = player(1000);
+        Player third = player(1000);
+        index.insert(third);
+        index.insert(first);
+        index.insert(second);
+
+        assertEquals(List.of(first, second, third), range(1000, 1000),
+                "A bucket is ordered by wait time, not by the order it was filled");
     }
 
     @Test void testRangeIsLazy() {
