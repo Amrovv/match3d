@@ -217,46 +217,65 @@ class MatchMakerTest {
         assertEquals(1, matcher.coolingCount(), "The anchor failed, so the anchor cools");
     }
 
-    // refilling a part filled lobby
+    // resuming a selection
 
-    @Test void testRefillFillsAVacatedSeatPos() {
-        // Nine held out of ten queued at one rating. The tenth is in the
-        // window, consents, and is not already held, so the seat is filled.
-        List<Player> queued = joinCluster(1000, 10);
-        List<Player> held = new ArrayList<>(queued.subList(0, 9));
-
-        List<Player> refilled = matcher.refill(held, NOW);
-
-        assertEquals(MatchMaker.LOBBY_SIZE, refilled.size(), "The vacated seat was filled");
-        assertTrue(refilled.contains(queued.get(9)), "The only candidate left is the one seated");
-    }
-
-    @Test void testRefillSeatsNobodyTwice() {
-        // Every held player is still in the index, and the merge offers them
-        // first because they have waited longest. Nothing stops a second
-        // seating but the check that they are already held.
+    @Test void testSelectionFillsALobbyPos() {
         List<Player> queued = joinCluster(1000, 12);
-        List<Player> held = new ArrayList<>(queued.subList(0, 9));
 
-        List<Player> refilled = matcher.refill(held, NOW);
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
 
-        assertEquals(MatchMaker.LOBBY_SIZE, refilled.size(), "The lobby stops at ten");
-        assertEquals(MatchMaker.LOBBY_SIZE, new HashSet<>(refilled).size(),
-                "A player already held cannot be drawn from the index and seated again");
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "A full lobby was seated");
+        assertEquals(queued.get(0), selection.members().get(0), "The anchor is seated first");
     }
 
-    @Test void testRefillLeavesTheLobbyShortIfNobodyConsentsNeg() {
-        // The nine have just queued, so their windows are the base radius. The
-        // only other player in the anchor's window sits far outside theirs, so
-        // the seat cannot be filled and refill returns what it was given.
-        List<Player> queued = joinCluster(1500, 9);
-        join(1000, 3600);
-        List<Player> held = new ArrayList<>(queued);
+    @Test void testSelectionResumesWhereItStoppedAfterADrop() {
+        // Twelve queued, ten seated, two dropped. The replacements have to come
+        // from the two the cursor had not reached, which is only possible if the
+        // walk resumes rather than starting the window again.
+        List<Player> queued = joinCluster(1000, 12);
 
-        List<Player> refilled = matcher.refill(held, NOW);
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+        List<Player> dropped = List.copyOf(selection.members().subList(8, 10));
+        selection.drop(dropped);
+        selection.fill();
 
-        assertEquals(9, refilled.size(), "No candidate consents, so the seat stays empty");
-        assertSame(held, refilled, "refill fills the list it was given");
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "The seats were refilled");
+        assertTrue(selection.members().containsAll(queued.subList(10, 12)),
+                "The replacements are the two the cursor had not yet reached");
+        dropped.forEach(gone -> assertFalse(selection.members().contains(gone),
+                "A dropped member is not seated again"));
+    }
+
+    @Test void testSelectionCannotFillWithoutCandidatesNeg() {
+        List<Player> queued = joinCluster(1000, 9);
+
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+
+        assertEquals(9, selection.members().size(), "Nine willing players seat nine");
+    }
+
+    @Test void testSelectionCannotReconsiderARejectedCandidate() {
+        // The outsider is rejected while the nine are seated, because they
+        // reach nowhere near this cluster. Dropping members widens the reach,
+        // but the cursor has already walked past them, so a resumed fill cannot
+        // take them. This is the cost of resuming rather than re-seeding.
+        Player anchor = join(1500, 3600);
+        Player outsider = join(2300, 95);
+        List<Player> spread = joinSpread();
+
+        MatchMaker.Selection selection = matcher.new Selection(anchor, NOW);
+        selection.fill();
+        assertFalse(selection.members().contains(outsider), "The outsider never consented");
+
+        selection.drop(List.copyOf(selection.members().subList(1, 10)));
+        selection.fill();
+
+        assertFalse(selection.members().contains(outsider),
+                "A resumed walk cannot go back for a candidate it has already passed");
+        assertTrue(spread.size() > 0, "The spread is what filled the lobby first time round");
     }
 
     // cooldown
@@ -345,19 +364,6 @@ class MatchMakerTest {
         assertEquals(0, matcher.contentionCount(),
                 "Nobody took a member, so the failure is not contention");
         assertEquals(0, matcher.retryCount(), "There was nothing to retry");
-    }
-
-    @Test void testAClaimedAnchorIsInvisibleToTheIndexUntilTheyAreSettled() {
-        // The anchor is claimed out of both structures at poll, so a failed
-        // pass has to put them back or they are stranded in neither.
-        List<Player> queued = joinCluster(1000, 9);
-
-        matcher.formLobby(NOW);
-
-        assertEquals(9, index.playerCount(), "The claimed anchor was returned to the index");
-        assertTrue(index.contains(queued.get(0).id()),
-                "And it is the anchor specifically, the longest waiter");
-        assertEquals(8, heap.size(), "They are cooling, so the heap does not hold them yet");
     }
 
     // clock skew

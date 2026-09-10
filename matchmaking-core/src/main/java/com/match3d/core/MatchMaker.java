@@ -88,7 +88,9 @@ public final class MatchMaker {
         }
         if (anchor == null) return Optional.empty();
 
-        List<Player> members = selectMembers(anchor, now);
+        Selection selection = new Selection(anchor, now);
+        selection.fill();
+        List<Player> members = selection.members();
 
         boolean settled = false;
         int budget = -1;
@@ -125,11 +127,11 @@ public final class MatchMaker {
 
                     budget--;
                     retries++;
-                    members.removeAll(missing);
+                    selection.drop(missing);
                 } finally {
                     commitLock.unlock();
                 }
-                refill(members, now);
+                selection.fill();
             }
         } finally {
             if (!settled) {
@@ -187,13 +189,81 @@ public final class MatchMaker {
     }
 
     /**
-     * The members the anchor can seat now, short if they cannot fill a lobby.
-     * Consent is mutual across every pair, not merely with the anchor.
+     * One anchor's walk through their window, resumable across attempts.
+     *
+     * The window is seeded once, in the constructor, and that seeding is the
+     * expensive part of a pass: it touches every occupied rating in the window,
+     * where seating a player costs a logarithm in the bucket count. Rebuilding
+     * it for every retry would make a retry cost what a whole fresh pass costs,
+     * so the cursor is kept and the walk resumes where it stopped.
+     *
+     * The cost is that a resumed walk cannot reconsider. Dropping a member
+     * widens the reach, so a candidate rejected earlier might be acceptable
+     * now, and the cursor has already passed them. A resumed pass can therefore
+     * fail to fill where a fresh one would have succeeded.
+     *
+     * Held by one worker for one pass and never shared. The cursor draws from
+     * live views, so it may offer a player who has already left and will not
+     * see a rating that became occupied after seeding. The verify under the
+     * lock is what makes both harmless.
      */
-    private List<Player> selectMembers(Player anchor, Instant now) {
-        List<Player> members = new ArrayList<>(LOBBY_SIZE);
-        members.add(anchor);
-        return refill(members, now);
+    final class Selection {
+
+        private final Player anchor;
+        private final Instant now;
+        private final Iterator<Player> cursor;
+        private final List<Player> members = new ArrayList<>(LOBBY_SIZE);
+
+        private Overlap overlap;
+
+        Selection(Player anchor, Instant now) {
+            this.anchor = anchor;
+            this.now = now;
+
+            int anchorRadius = radiusOf(anchor, now);
+
+            // The window is the anchor's own reach, so it excludes only
+            // candidates Overlap would reject anyway. An optimisation, not a
+            // filter.
+            int windowLow = anchor.rating() - anchorRadius;
+            int windowHigh = anchor.rating() + anchorRadius;
+
+            this.cursor = WaitTimeMerge.byWaitTime(
+                    index.playersInRange(windowLow, windowHigh)).iterator();
+
+            members.add(anchor);
+            this.overlap = Overlap.of(anchor, anchorRadius);
+        }
+
+        /** Seats candidates until the lobby is full or the window is spent. */
+        void fill() {
+            while (members.size() < LOBBY_SIZE && cursor.hasNext()) {
+                Player candidate = cursor.next();
+                if (members.contains(candidate)) continue;
+
+                Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
+                if (extended.valid()) {
+                    overlap = extended;
+                    members.add(candidate);
+                }
+            }
+        }
+
+        /**
+         * Removes members and rebuilds the consent state from those left.
+         *
+         * Overlap is a lossy fold, so it cannot be un-extended. Refolding is
+         * nine constant time steps, against a re-seed of the whole window.
+         */
+        void drop(List<Player> gone) {
+            members.removeAll(gone);
+            overlap = overlapOf(members, now);
+        }
+
+        /** The seated members, the anchor first. Short until fill succeeds. */
+        List<Player> members() {
+            return members;
+        }
     }
 
     /**
@@ -203,39 +273,6 @@ public final class MatchMaker {
     private static int radiusOf(Player player, Instant now) {
         Duration waited = Duration.between(player.queuedAt(), now);
         return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
-    }
-
-    /**
-     * Fills held up to a full lobby, admitting only candidates who consent with
-     * everyone already seated. Modifies and returns held, short if nobody does.
-     *
-     * Package private so a test can exercise a part filled lobby directly.
-     */
-    List<Player> refill(List<Player> held, Instant now) {
-        Player anchor = held.get(0);
-        int anchorRadius = radiusOf(anchor, now);
-
-        // The window is the anchor's own reach, so it excludes only candidates
-        // Overlap would reject anyway. An optimisation, not a filter.
-        int windowLow = anchor.rating() - anchorRadius;
-        int windowHigh = anchor.rating() + anchorRadius;
-
-        Iterator<Player> candidateCursor =
-                WaitTimeMerge.byWaitTime(index.playersInRange(windowLow, windowHigh)).iterator();
-
-        Overlap overlap = overlapOf(held, now);
-
-        while (held.size() < LOBBY_SIZE && candidateCursor.hasNext()) {
-            Player candidate = candidateCursor.next();
-            if (held.contains(candidate)) continue;
-
-            Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
-            if (extended.valid()) {
-                overlap = extended;
-                held.add(candidate);
-            }
-        }
-        return held;
     }
 
     /** The consent state of a seated group, folded from scratch. */
