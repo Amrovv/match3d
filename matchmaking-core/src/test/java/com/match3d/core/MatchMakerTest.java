@@ -217,6 +217,48 @@ class MatchMakerTest {
         assertEquals(1, matcher.coolingCount(), "The anchor failed, so the anchor cools");
     }
 
+    // refilling a part filled lobby
+
+    @Test void testRefillFillsAVacatedSeatPos() {
+        // Nine held out of ten queued at one rating. The tenth is in the
+        // window, consents, and is not already held, so the seat is filled.
+        List<Player> queued = joinCluster(1000, 10);
+        List<Player> held = new ArrayList<>(queued.subList(0, 9));
+
+        List<Player> refilled = matcher.refill(held, NOW);
+
+        assertEquals(MatchMaker.LOBBY_SIZE, refilled.size(), "The vacated seat was filled");
+        assertTrue(refilled.contains(queued.get(9)), "The only candidate left is the one seated");
+    }
+
+    @Test void testRefillSeatsNobodyTwice() {
+        // Every held player is still in the index, and the merge offers them
+        // first because they have waited longest. Nothing stops a second
+        // seating but the check that they are already held.
+        List<Player> queued = joinCluster(1000, 12);
+        List<Player> held = new ArrayList<>(queued.subList(0, 9));
+
+        List<Player> refilled = matcher.refill(held, NOW);
+
+        assertEquals(MatchMaker.LOBBY_SIZE, refilled.size(), "The lobby stops at ten");
+        assertEquals(MatchMaker.LOBBY_SIZE, new HashSet<>(refilled).size(),
+                "A player already held cannot be drawn from the index and seated again");
+    }
+
+    @Test void testRefillLeavesTheLobbyShortIfNobodyConsentsNeg() {
+        // The nine have just queued, so their windows are the base radius. The
+        // only other player in the anchor's window sits far outside theirs, so
+        // the seat cannot be filled and refill returns what it was given.
+        List<Player> queued = joinCluster(1500, 9);
+        join(1000, 3600);
+        List<Player> held = new ArrayList<>(queued);
+
+        List<Player> refilled = matcher.refill(held, NOW);
+
+        assertEquals(9, refilled.size(), "No candidate consents, so the seat stays empty");
+        assertSame(held, refilled, "refill fills the list it was given");
+    }
+
     // cooldown
 
     @Test void testAFailedAnchorDoesNotAnchorAgainImmediately() {

@@ -11,7 +11,7 @@ import java.util.PriorityQueue;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Forms lobbies, one attempt per call. The heap names the anchor, their wait
+ * Forms lobbies, one anchor per call. The heap names the anchor, their wait
  * sets a radius, the index yields candidates inside it, and consent must be
  * mutual across every pair.
  *
@@ -65,11 +65,18 @@ public final class MatchMaker {
     }
 
     /**
-     * One attempt. Selection runs outside the lock and is verified under it,
-     * so a lobby forms only if all ten are still queued at that moment.
+     * One anchor, and as many attempts as their budget allows. Selection runs
+     * outside the lock and is verified under it, so a lobby forms only if all
+     * ten are still queued at that moment. A member taken by another worker in
+     * between is replaced and the lobby verified again.
      *
-     * Empty means the anchor could not fill a lobby, lost a member to another
-     * worker, or was itself matched elsewhere.
+     * The budget is the seats standing at the first failed verify, so a nearly
+     * complete lobby is worth more persistence than a bare one. It is set once,
+     * since recomputing it from a later, fuller selection would let it grow and
+     * the loop would not terminate.
+     *
+     * Empty means the anchor could not fill a lobby, spent the budget losing
+     * members, or was itself matched elsewhere.
      */
     public Optional<Lobby> formLobby(Instant now) {
         Player anchor;
@@ -83,27 +90,42 @@ public final class MatchMaker {
 
         List<Player> members = selectMembers(anchor, now);
 
-        commitLock.lock();
-        try {
-            if (members.size() < LOBBY_SIZE) {
-                cool(anchor, now, false);
-                return Optional.empty();
-            }
-            List<Player> missing = missing(members);
-            if (!missing.isEmpty()) {
+        int budget = -1;
+        while (true) {
+            commitLock.lock();
+            try {
+                if (members.size() < LOBBY_SIZE) {
+                    cool(anchor, now, false);
+                    return Optional.empty();
+                }
+                List<Player> missing = missing(members);
+
+                if (missing.isEmpty()) {
+                    commit(members);
+                    return Optional.of(new Lobby(members));
+                }
+
                 if (missing.contains(anchor)) {
                     aborts++;
                     return Optional.empty();
                 }
-                cool(anchor, now, true);
-                return Optional.empty();
-            }
-            commit(members);
-        } finally {
-            commitLock.unlock();
-        }
 
-        return Optional.of(new Lobby(members));
+                if (budget < 0) {
+                    budget = members.size() - missing.size();
+                }
+                if (budget == 0) {
+                    cool(anchor, now, true);
+                    return Optional.empty();
+                }
+
+                budget--;
+                retries++;
+                members.removeAll(missing);
+            } finally {
+                commitLock.unlock();
+            }
+            refill(members, now);
+        }
     }
 
     /** Under the lock. Drains cooled anchors, then polls one. Null if none. */
@@ -115,7 +137,8 @@ public final class MatchMaker {
     /** Under the lock. Members no longer queued, empty if all ten survive. */
     private List<Player> missing(List<Player> members) {
         List<Player> missing = new ArrayList<>();
-        for (Player member : members) {
+        for (int i = 0; i < members.size(); i++) {
+            Player member = members.get(i);
             if (!index.contains(member.id())) missing.add(member);
         }
         return missing;
@@ -135,6 +158,10 @@ public final class MatchMaker {
      * Under the lock. A matched anchor is counted as an abort rather than
      * cooled, since cooling would return them to the heap.
      */
+    /**
+     * Under the lock. A matched anchor is counted as an abort rather than
+     * cooled, since cooling would return them to the heap.
+     */
     private void cool(Player anchor, Instant now, boolean lostToContention) {
         if (!index.contains(anchor.id())) {
             aborts++;
@@ -143,7 +170,6 @@ public final class MatchMaker {
 
         if (lostToContention) contentionCooldowns++;
         else starvationCooldowns++;
-
         cooling.add(new Pending(anchor, now.plus(cooldown)));
     }
 
@@ -152,6 +178,28 @@ public final class MatchMaker {
      * Consent is mutual across every pair, not merely with the anchor.
      */
     private List<Player> selectMembers(Player anchor, Instant now) {
+        List<Player> members = new ArrayList<>(LOBBY_SIZE);
+        members.add(anchor);
+        return refill(members, now);
+    }
+
+    /**
+     * A queue time in the future counts as no wait, since intake and the
+     * engine stamp it on different clocks.
+     */
+    private static int radiusOf(Player player, Instant now) {
+        Duration waited = Duration.between(player.queuedAt(), now);
+        return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
+    }
+
+    /**
+     * Fills held up to a full lobby, admitting only candidates who consent with
+     * everyone already seated. Modifies and returns held, short if nobody does.
+     *
+     * Package private so a test can exercise a part filled lobby directly.
+     */
+    List<Player> refill(List<Player> held, Instant now) {
+        Player anchor = held.get(0);
         int anchorRadius = radiusOf(anchor, now);
 
         // The window is the anchor's own reach, so it excludes only candidates
@@ -162,31 +210,30 @@ public final class MatchMaker {
         Iterator<Player> candidateCursor =
                 WaitTimeMerge.byWaitTime(index.playersInRange(windowLow, windowHigh)).iterator();
 
-        Overlap overlap = Overlap.of(anchor, anchorRadius);
+        Overlap overlap = overlapOf(held, now);
 
-        List<Player> members = new ArrayList<>(LOBBY_SIZE);
-        members.add(anchor);
-
-        while (members.size() < LOBBY_SIZE && candidateCursor.hasNext()) {
+        while (held.size() < LOBBY_SIZE && candidateCursor.hasNext()) {
             Player candidate = candidateCursor.next();
-            if (candidate.equals(anchor)) continue;
+            if (held.contains(candidate)) continue;
 
             Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
             if (extended.valid()) {
                 overlap = extended;
-                members.add(candidate);
+                held.add(candidate);
             }
         }
-        return members;
+        return held;
     }
 
-    /**
-     * A queue time in the future counts as no wait, since intake and the
-     * engine stamp it on different clocks.
-     */
-    private static int radiusOf(Player player, Instant now) {
-        Duration waited = Duration.between(player.queuedAt(), now);
-        return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
+    /** The consent state of a seated group, folded from scratch. */
+    private Overlap overlapOf(List<Player> seated, Instant now) {
+        Player first = seated.get(0);
+        Overlap overlap = Overlap.of(first, radiusOf(first, now));
+
+        for (Player player : seated.subList(1, seated.size())) {
+            overlap = overlap.extendedBy(player, radiusOf(player, now));
+        }
+        return overlap;
     }
 
     /** Returns every player whose cooldown has expired to the heap. */
