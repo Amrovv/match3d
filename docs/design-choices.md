@@ -8,11 +8,60 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Selecting a lobby](#selecting-a-lobby)
-2. [Fairness and waiting](#fairness-and-waiting)
-3. [Indexing players by skill](#indexing-players-by-skill)
-4. [The domain model](#the-domain-model)
-5. [Repository and build](#repository-and-build)
+1. [Matching under contention](#matching-under-contention)
+2. [Selecting a lobby](#selecting-a-lobby)
+3. [Fairness and waiting](#fairness-and-waiting)
+4. [Indexing players by skill](#indexing-players-by-skill)
+5. [The domain model](#the-domain-model)
+6. [Repository and build](#repository-and-build)
+
+## Matching under contention
+
+### Optimistic selection, exclusive commit
+
+**Options.** One lock held across the whole pass, a lock per structure, or an unsynchronised selection verified under a lock.
+
+**Chosen.** Verify. A lock per structure closes nothing, because the race lives in the gaps between individually atomic operations: the unit of safety is a span, not an object. That leaves a span, and the span that covers everything is the whole pass, which is also where all the time goes. Selection seeds a merge over every bucket in the window; the commit is ten removals. Locking selection makes eight workers behave as one.
+
+The two problems with an unsynchronised selection are that it reads live views and that its result is stale by commit time. Neither says no other worker may select at once. Both say a selection cannot be trusted when it is committed, which is a verification requirement, and verifying is cheap where excluding is not.
+
+**Cost.** Wasted work under contention, and a second correctness argument to hold: the structures are safe because the lock covers every mutation, and the outcome is correct because the commit verifies. Neither alone is enough.
+
+### Nothing is removed unless all ten verify
+
+**Options.** Claim and remove members as they are confirmed, or verify all ten and remove none unless all survive.
+
+**Chosen.** All or nothing. Incremental claiming leaves a worker that then fails holding players who are in no lobby and in no queue. That deletes a player where the original race merely duplicated one, and it is only safe with a release step that a dying worker never performs.
+
+**Cost.** A worker can do a full selection and commit nothing.
+
+### The anchor is claimed, the members are not
+
+**Options.** Leave the anchor in the index while a worker builds around them, or remove them for the duration of the pass.
+
+**Chosen.** Claim. Anchors are the longest waiters and the merge offers those first, so every worker's candidate draw began with the other workers' anchors. Measured over ten rounds at maximum contention, 464 passes were abandoned because the anchor had been recruited elsewhere, and the retry path never executed once.
+
+**Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued player is in exactly one place at any moment, which is also what party matching will need.
+
+### A retry budget of the seats standing
+
+**Options.** Abandon the pass when a member is taken, retry without limit, or retry a bounded number of times.
+
+**Chosen.** Bounded, and the bound is the number of seats still standing at the first failed verify, so a nearly complete lobby is worth more persistence than a bare one. It is set once. Recomputing it from a later, fuller selection lets it grow, and the loop stops terminating under exactly the contention it exists for.
+
+Retrying is for contention, where another worker committed and the index has changed. A refill that finds nobody is starvation, where nothing has changed and asking again microseconds later returns the same answer, so that cools instead.
+
+**Cost.** A selection that starts at three seats and grows to nine keeps the budget of three, so a lobby that became valuable mid pass is not credited for it. Termination is worth more than the credit.
+
+### A retry resumes the walk rather than re-seeding it
+
+**Options.** Rebuild the candidate merge for each attempt, or carry the cursor and the consent state across attempts.
+
+**Chosen.** Carry them. Seeding touches every occupied rating in the window and is the expensive part of a pass; seating a player is a logarithm in the bucket count. Rebuilding to save nine constant time consent checks made a retry cost what a whole fresh pass costs, which is why the first version of the retry loop measured no better than abandoning.
+
+20k players, normal spread, eight workers, fifteen repeats: 399 lobbies in 100ms rebuilding, 988 resuming.
+
+**Cost.** A resumed walk cannot reconsider. Dropping a member widens the reach, so a candidate rejected earlier might be acceptable now, and the cursor has already passed them. A resumed pass can therefore fail to fill where a fresh one would have succeeded. Ratings that become occupied after seeding are also invisible for the rest of the pass, which is consistent with the pass already fixing its own instant.
 
 ## Selecting a lobby
 
@@ -50,6 +99,8 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
+**Amended, 10 September 2026.** Still one anchor per call, but no longer one attempt: a pass that loses a member to another worker refills and verifies again, within a budget. The termination argument survives, since the budget is set once and decremented, and every call still shrinks the heap.
+
 ### A fixed cooldown for failed anchors
 
 **Options.** Reinsert immediately, a fixed period, or a period growing with each failure.
@@ -57,6 +108,8 @@ This looked like it would force backtracking and nearly forced a redesign away f
 **Chosen.** Fixed at 10 seconds. Immediate reinsertion fails outright, since the heap orders by queue time and reinsertion does not change it, so the same player returns on the very next call. Growing cooldowns point the wrong way: the repeat failer is the player furthest from the rating mass, precisely who the heap protects, and the moment they become matchable is uncorrelated with their failure count. Queue time is untouched while they sit out, so they return to the front with a wider radius.
 
 **Cost.** 10 seconds is a constant with nothing behind it, and no failure count is stored, so a player failing repeatedly goes unnoticed.
+
+**Amended, 10 September 2026.** The period is a constructor argument now, defaulting to the same ten seconds. It is policy rather than physics, and a cooldown longer than a measurement window makes the measurement about the cooldown. Cooling also records its cause, since an anchor with no lobby available and an anchor that lost too many races are different facts about the queue wearing the same treatment.
 
 ### Cooling bars anchoring, not matching
 
@@ -138,11 +191,17 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 
 **Cost.** The interview answer is now about why `TreeMap` was chosen rather than about a tree that was built. Weaker looking, and honest. No benchmark numbers survive, since the harness measured a lazy view against a full materialisation and was not worth repairing.
 
+**Reversed, 10 September 2026, to `ConcurrentSkipListMap`.** Matching now selects candidates without holding the lock, which means iterating a window while another worker commits into it. A `TreeMap` iterator is fail fast, so workers were surviving `ConcurrentModificationException` mid pass, and fail fast is documented as best effort, so the silent corruption behind it could not be ruled out either. Copying the window instead would destroy the laziness the whole index exists for, and taking the lock during selection would serialise the expensive part of a pass.
+
+A skip list is still an ordered map implementing `NavigableMap`, so range queries, `subMap` and the 5000 entry bound are all unchanged. What changes is that iteration is weakly consistent instead of fail fast.
+
+**Cost.** A probabilistic bound rather than a worst case one, and the structure is no longer a balanced tree, so the reason for choosing an ordered structure has to be stated as order versus a hash map rather than as a tree versus anything. Weakly consistent also means a drawn player may already have left, which is why the commit verifies rather than trusting the draw.
+
 ### One bucket per exact rating
 
 **Options.** One node per player, one per exact rating, or banded buckets spanning a range.
 
-**Chosen.** One per exact rating. Ratings run 1 to 5000, so the tree is bounded at 5000 nodes however many players queue. Banding would cut the buckets a query touches from about 201 to about 9 on a window of plus or minus 100, but a banded bucket holds players outside the window, so edges need filtering, and rating order inside a bucket is lost.
+**Chosen.** One per exact rating. Ratings run 1 to 5000, so the index is bounded at 5000 entries however many players queue. Banding would cut the buckets a query touches from about 201 to about 9 on a window of plus or minus 100, but a banded bucket holds players outside the window, so edges need filtering, and rating order inside a bucket is lost.
 
 **Cost.** A query touches more buckets than a banded index would.
 
@@ -153,6 +212,14 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 **Chosen.** `LinkedHashSet`. Arrival order is already wait time order, so the order needs preserving, not computing.
 
 **Cost.** The guarantee is implicit. It holds only because insertion happens to be chronological, and nothing in the type system says so.
+
+**Reversed, 10 September 2026, to `ConcurrentSkipListSet` ordered by wait time.** The same concurrent iteration problem as the map above, and a bucket iterator is live for far longer than the map's, since it stays open for the whole candidate walk.
+
+The implicit ordering cost disappears with it. The order is now a property of the type, which matters once players arrive over a message queue and delivery order stops being join order.
+
+**Cost.** Bucket operations become O(log n_b) rather than O(1), where n_b is the players at one exact rating. A hand rolled concurrent linked hash set would keep the O(1), and was rejected: the prize is roughly sixteen comparisons on a crowded bucket, the risk is a memory visibility bug that no single threaded test can catch, and no benchmark exists yet to say the bucket is hot at all.
+
+Equality inside a bucket is now the comparator's, queue time then id, rather than `Player.equals`, which is the id alone. That is safe only because removal looks the player up in the id map first and hands the bucket the object it filed.
 
 ### Empty buckets are deleted
 
@@ -180,7 +247,7 @@ Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper 
 
 A stream rather than an iterator because it composes: `flatMap`, `limit` and `takeWhile` come free, which is how tests flatten buckets back to players in one line and how the matcher stops early without a loop tracking its own count.
 
-**Cost.** The buckets handed out are live views, not copies, so the caller must finish drawing before mutating the index. Laziness and immunity to concurrent modification cannot both be had. The contract is documented and a test asserts the exception rather than a comment asserting the rule.
+**Cost.** The buckets handed out are live views, not copies. Since both levels became skip lists the draw no longer throws when another thread mutates the index, but it is still weakly consistent: a player drawn from it may already have left. The commit verifies for exactly that reason.
 
 ### No side index by player id
 
@@ -189,6 +256,12 @@ A stream rather than an iterator because it composes: `flatMap`, `limit` and `ta
 **Chosen.** No side index. Uniqueness becomes a rule upstream: a queued player must leave before queueing again.
 
 **Cost.** `SkillIndex` is not authoritative about its own contents. The same id inserted at two different ratings lands in two buckets and both inserts succeed, structurally the same defect that ended the AVL attempt. An upstream check is a policy, not a guarantee, and two threads can interleave through it. Due for revisit when the worker pool lands.
+
+**Reversed, 10 September 2026.** A map from id to player now sits beside the ordered map and is the authority on what is queued. The revisit was forced by the concurrency fix, which has to ask whether an id is still queued at all, and a rating keyed index can only answer whether a player is queued at a given rating.
+
+Three consequences. Insert refuses a duplicate id whatever rating a second join carries, which closes the orphan entry above. Remove takes the id as the address and ignores the rating on the argument, so a caller holding a player whose rating has since changed still removes the right entry. The player count is the map's size, so it cannot drift from the contents.
+
+**Cost.** Two structures that must stay in step, the same discipline the fairness heap already carries with its position map, and it fails silently when broken. Removing with a stale rating used to return false; it now succeeds, which reads like losing a check but is not, since nothing was reading that false.
 
 ## The domain model
 

@@ -5,16 +5,15 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Queued players ordered by wait time, longest waiting first.
+ * Queued players ordered by wait time, longest waiting first. An array backed
+ * binary min heap on queuedAt, with a map from id to array index so removal
+ * from the middle is O(log n) rather than O(n).
  *
- * An array backed binary min heap keyed on queuedAt.
- * In addition to the array, a map from id to index in the array is maintained so
- * that player removal is O(log n) rather than O(n). 
+ * Ties break on id, so ordering is total and deterministic.
  *
- * Ties on queuedAt break on id. Deterministic ordering.
+ * insert, poll and remove are O(log n); peek, contains and size are O(1).
  *
- * insert, poll and remove are O(log n), peek, contains and size are O(1). The
- * array doubles when full, so insert is O(1) amortised on the array itself.
+ * Not synchronised. The caller supplies mutual exclusion.
  */
 public final class FairnessHeap {
 
@@ -25,32 +24,19 @@ public final class FairnessHeap {
     private int size = 0;
 
 
-    /** 
-     * Get the Parent index for the given index.
-    */
-    private int parent(int index) {
+        private int parent(int index) {
         return (index - 1) / 2;
     }
 
-    /**
-     * Get the Left Child index for the given index
-    */
-    private int left(int index) {
+        private int left(int index) {
         return 2 * index + 1;
     }
     
-    /**
-     * Get the Right Child index for the given index
-    */
-    private int right(int index) {
+        private int right(int index) {
         return 2 * index + 2;
     }
 
-    /**
-     * Adds a player
-     *
-     * Returns false if that id is already queued.
-     */
+    /** Adds a player. False if that id is already queued. */
     public boolean insert(Player player) {
         if (positions.containsKey(player.id())) return false;
         if (size == heap.length) grow();
@@ -61,16 +47,12 @@ public final class FairnessHeap {
         return true;
     }
 
-    /**
-     * The longest waiting player, without removing them, or null if empty.
-     */
+    /** The longest waiting player, or null if empty. */
     public Player peek() {
         return heap[0];
     }
 
-    /**
-     * Removes and returns the longest waiting player, or null if empty.
-     */
+    /** Removes and returns the longest waiting player, or null if empty. */
     public Player poll() {
         Player player = heap[0];
         if (player == null) return null;
@@ -78,11 +60,7 @@ public final class FairnessHeap {
         return player;
     }
 
-    /**
-     * Removes a player by id, wherever they sit in the heap.
-     *
-     * Returns false if that id is not queued.
-     */
+    /** Removes by id, wherever they sit. False if that id is not queued. */
     public boolean remove(UUID id) {
         Integer index = positions.remove(id);
         if (index == null) return false;
@@ -108,9 +86,7 @@ public final class FairnessHeap {
         return size;
     }
 
-    /**
-     * Moves the player at index up until their parent waits at least as long.
-     */
+    /** Up until the parent waits at least as long. */
     private void siftUp(int index) {
         while (index != 0 && (Player.BY_WAIT_TIME.compare(heap[index], heap[parent(index)]) < 0)){
             swap(index, parent(index));
@@ -118,9 +94,7 @@ public final class FairnessHeap {
         }
     }
 
-    /**
-     * Moves the player at index down until both children wait at least as long.
-     */
+    /** Down until both children wait at least as long. */
     private void siftDown(int index) {
         int l = left(index);
         int r = right(index);
@@ -140,10 +114,8 @@ public final class FairnessHeap {
     }
 
     /**
-     * Swaps two entries, keeping the position map in step.
-     *
-     * Every move of a player inside the array must go through here, or the map
-     * and the array drift apart and remove starts corrupting the heap.
+     * Every move inside the array goes through here, or the map and the array
+     * drift apart and remove starts corrupting the heap silently.
      */
     private void swap(int a, int b) {
         Player playerA = heap[a];
@@ -157,9 +129,7 @@ public final class FairnessHeap {
 
     }
 
-    /**
-     * Doubles the backing array when it is full.
-     */
+    /** Doubles the backing array when it is full. */
     private void grow() {
         Player[] newHeap = new Player[heap.length * 2];
         System.arraycopy(heap, 0, newHeap, 0, heap.length);

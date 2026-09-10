@@ -217,6 +217,67 @@ class MatchMakerTest {
         assertEquals(1, matcher.coolingCount(), "The anchor failed, so the anchor cools");
     }
 
+    // resuming a selection
+
+    @Test void testSelectionFillsALobbyPos() {
+        List<Player> queued = joinCluster(1000, 12);
+
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "A full lobby was seated");
+        assertEquals(queued.get(0), selection.members().get(0), "The anchor is seated first");
+    }
+
+    @Test void testSelectionResumesWhereItStoppedAfterADrop() {
+        // Twelve queued, ten seated, two dropped. The replacements have to come
+        // from the two the cursor had not reached, which is only possible if the
+        // walk resumes rather than starting the window again.
+        List<Player> queued = joinCluster(1000, 12);
+
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+        List<Player> dropped = List.copyOf(selection.members().subList(8, 10));
+        selection.drop(dropped);
+        selection.fill();
+
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "The seats were refilled");
+        assertTrue(selection.members().containsAll(queued.subList(10, 12)),
+                "The replacements are the two the cursor had not yet reached");
+        dropped.forEach(gone -> assertFalse(selection.members().contains(gone),
+                "A dropped member is not seated again"));
+    }
+
+    @Test void testSelectionCannotFillWithoutCandidatesNeg() {
+        List<Player> queued = joinCluster(1000, 9);
+
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+
+        assertEquals(9, selection.members().size(), "Nine willing players seat nine");
+    }
+
+    @Test void testSelectionCannotReconsiderARejectedCandidate() {
+        // The outsider is rejected while the nine are seated, because they
+        // reach nowhere near this cluster. Dropping members widens the reach,
+        // but the cursor has already walked past them, so a resumed fill cannot
+        // take them. This is the cost of resuming rather than re-seeding.
+        Player anchor = join(1500, 3600);
+        Player outsider = join(2300, 95);
+        List<Player> spread = joinSpread();
+
+        MatchMaker.Selection selection = matcher.new Selection(anchor, NOW);
+        selection.fill();
+        assertFalse(selection.members().contains(outsider), "The outsider never consented");
+
+        selection.drop(List.copyOf(selection.members().subList(1, 10)));
+        selection.fill();
+
+        assertFalse(selection.members().contains(outsider),
+                "A resumed walk cannot go back for a candidate it has already passed");
+        assertTrue(spread.size() > 0, "The spread is what filled the lobby first time round");
+    }
+
     // cooldown
 
     @Test void testAFailedAnchorDoesNotAnchorAgainImmediately() {
@@ -279,6 +340,30 @@ class MatchMakerTest {
                 "The cooldown has expired, but the player is in a lobby and must not be drained back");
         assertFalse(index.playersInRange(0, 5000).anyMatch(b -> b.contains(failedAnchor)),
                 "Nor are they still queued by rating");
+    }
+
+    // counting what a pass did
+
+    @Test void testASuccessfulLobbyCountsNothing() {
+        joinCluster(1000, 10);
+
+        matcher.formLobby(NOW);
+
+        assertEquals(0, matcher.retryCount(), "Nothing was taken, so nothing was retried");
+        assertEquals(0, matcher.starvationCount(), "A lobby formed, so no anchor was cooled");
+        assertEquals(0, matcher.contentionCount(), "No budget was spent");
+        assertEquals(0, matcher.abortCount(), "The anchor was never at risk");
+    }
+
+    @Test void testAnAnchorWhoCannotFillALobbyIsCountedAsStarvation() {
+        joinCluster(1000, 9);
+
+        matcher.formLobby(NOW);
+
+        assertEquals(1, matcher.starvationCount(), "No lobby existed for this anchor");
+        assertEquals(0, matcher.contentionCount(),
+                "Nobody took a member, so the failure is not contention");
+        assertEquals(0, matcher.retryCount(), "There was nothing to retry");
     }
 
     // clock skew

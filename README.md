@@ -52,7 +52,7 @@ The engine is a standalone module with no web framework and no network code, so 
 
 ### Project status
 
-The core engine is built and tested: the skill index, the fairness heap and its widening window, and the matching pass itself, covered by 118 tests. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, and the concurrency work that lets several worker threads run it against one shared queue, covered by 146 tests and a benchmark. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -92,7 +92,7 @@ flowchart TD
         direction LR
         index["SkillIndex<br/>range query by rating"]
         heap["FairnessHeap<br/>window widens with wait time"]
-        matcher["MatchMaker<br/>forms a lobby, removes<br/>members from both structures"]
+        matcher["MatchMaker<br/>forms a lobby, verifies and<br/>commits it under one lock"]
         index --> matcher
         heap --> matcher
     end
@@ -109,7 +109,7 @@ Dashed means not built yet.
 
 | Module | Holds | Status |
 |---|---|---|
-| `matchmaking-core` | Domain model, skill index, fairness heap, widening function, matching algorithm | Built |
+| `matchmaking-core` | Domain model, skill index, fairness heap, widening function, matching algorithm, concurrency | Built |
 | `common` | Shared event types and DTOs used by both services | Skeleton only |
 | `intake-service` | REST endpoints for join, leave, status, party formation | Skeleton only |
 | `matchmaking-service` | Consumes queue events, runs the engine, persists, exposes query endpoints | Skeleton only |
@@ -141,6 +141,12 @@ There is nothing to run yet, no service has a main method. The engine is exercis
 ./gradlew :matchmaking-core:test
 ```
 
+Throughput under contention is measured separately, and is excluded from the normal build because a timing measurement is not a regression gate:
+
+```sh
+./gradlew :matchmaking-core:benchmark
+```
+
 The HTML report lands in `matchmaking-core/build/reports/tests/test/index.html`.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -155,7 +161,7 @@ Not yet implemented.
 
 - [x] Milestone 0, repo, CI, and the branch to pull request workflow
 - [x] Milestone 1, core engine, skill index, fairness heap, and matching algorithm
-- [ ] Milestone 2, concurrency, the race reproduced and fixed
+- [x] Milestone 2, concurrency, the race reproduced and fixed
 - [ ] Milestone 3, `MatchmakingStrategy` with skill based and party aware implementations
 - [ ] Milestone 4, split into two services over RabbitMQ, REST API
 - [ ] Milestone 5, PostgreSQL persistence and Elo style rating updates
@@ -168,8 +174,9 @@ Not yet implemented.
 ## Limitations
 
 * Matching is greedy. It can miss a valid lobby that exists elsewhere in the queue.
-* `SkillIndex` is keyed by rating, so uniqueness is enforced upstream rather than guaranteed by the index.
-* No performance measurement exists. Every stated cost is derived from the structures, not observed.
+* Every commit serialises through one lock, so the engine scales by making passes cheap rather than by running more of them. Sharding the queue by rating band is the recorded next step.
+* Matching runs in one process. Several threads share one engine, but nothing coordinates two engines, so scaling out is a design question rather than a configuration one.
+* The benchmark measures throughput on a synthetic population. No latency or queue time figure is measured, and the widening curve's constants have no data behind them.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

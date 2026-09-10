@@ -1,7 +1,6 @@
 package com.match3d.core;
 
 import java.time.Instant;
-import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -90,13 +89,56 @@ class SkillIndexTest {
         assertEquals(1, index.playerCount(), "A failed remove must not change the count");
     }
 
-    @Test void testRemoveNegWrongRating() {
+    @Test void testInsertNegSameIdDifferentRating() {
         UUID id = UUID.randomUUID();
         index.insert(player(id, 1000));
 
-        assertFalse(index.remove(player(id, 2000)),
-                "The rating is the address, so the wrong rating looks in the wrong bucket");
-        assertEquals(1, index.playerCount(), "The player is still queued at their real rating");
+        assertFalse(index.insert(player(id, 2000)),
+                "An id is queued at most once, whatever rating the second join carries");
+        assertEquals(1, index.playerCount(), "A rejected insert must not change the count");
+        assertEquals(1, index.ratingCount(), "A rejected insert must not occupy a second rating");
+    }
+
+    // contains
+
+    @Test void testContainsPos() {
+        Player p = player(1000);
+        index.insert(p);
+
+        assertTrue(index.contains(p.id()), "A queued id is contained");
+    }
+
+    @Test void testContainsNegAfterRemoval() {
+        Player p = player(1000);
+        index.insert(p);
+        index.remove(p);
+
+        assertFalse(index.contains(p.id()), "A removed id is no longer contained");
+    }
+
+    @Test void testRemoveByIdPos() {
+        Player p = player(1000);
+        index.insert(p);
+
+        assertTrue(index.remove(p.id()), "A queued id should be removable without the player");
+        assertEquals(0, index.playerCount(), "The player is no longer queued");
+    }
+
+    @Test void testRemoveByIdNeg() {
+        index.insert(player(1000));
+
+        assertFalse(index.remove(UUID.randomUUID()), "An id that never queued cannot be removed");
+        assertEquals(1, index.playerCount(), "A failed remove must not change the count");
+    }
+
+    @Test void testRemoveIgnoresAStaleRating() {
+        UUID id = UUID.randomUUID();
+        index.insert(player(id, 1000));
+
+        assertTrue(index.remove(player(id, 2000)),
+                "The id is the address, so a stale rating still finds the entry");
+        assertEquals(0, index.playerCount(), "The player is no longer queued at any rating");
+        assertEquals(0, index.ratingCount(), "Their bucket was deleted once it emptied");
     }
 
     @Test void testRemoveDeletesEmptyBucket() {
@@ -194,6 +236,22 @@ class SkillIndexTest {
                 "Within one rating, the longest waiting player comes first");
     }
 
+    @Test void testRangeOrdersOutOfOrderArrivalsByWaitTime() {
+        // Arrivals are chronological in practice, so insertion order and wait
+        // time order usually agree and a bucket that merely preserved arrival
+        // order would pass every other ordering test. Inserting out of order is
+        // the only way to tell the two apart.
+        Player first = player(1000);
+        Player second = player(1000);
+        Player third = player(1000);
+        index.insert(third);
+        index.insert(first);
+        index.insert(second);
+
+        assertEquals(List.of(first, second, third), range(1000, 1000),
+                "A bucket is ordered by wait time, not by the order it was filled");
+    }
+
     @Test void testRangeIsLazy() {
         for (int rating = 1000; rating < 1050; rating++) {
             index.insert(player(rating));
@@ -262,14 +320,15 @@ class SkillIndexTest {
                 "One fat bucket must not be walked to its end, the matcher relies on stopping early");
     }
 
-    @Test void testRangeThrowsIfTheIndexIsMutatedMidDrawNeg() {
+    @Test void testRangeToleratesMutationMidDraw() {
         for (int rating = 1000; rating < 1010; rating++) {
             index.insert(player(rating));
         }
 
-        assertThrows(ConcurrentModificationException.class,
+        assertDoesNotThrow(
                 () -> index.playersInRange(1000, 1009).flatMap(Set::stream).forEach(index::remove),
-                "The window is a live view, so the caller must finish drawing before it mutates");
+                "The window is weakly consistent, so mutating mid draw does not throw");
+        assertEquals(0, index.playerCount(), "The draw still reached every player");
     }
 
     // counters
