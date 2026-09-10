@@ -138,11 +138,17 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 
 **Cost.** The interview answer is now about why `TreeMap` was chosen rather than about a tree that was built. Weaker looking, and honest. No benchmark numbers survive, since the harness measured a lazy view against a full materialisation and was not worth repairing.
 
+**Reversed, 10 September 2026, to `ConcurrentSkipListMap`.** Matching now selects candidates without holding the lock, which means iterating a window while another worker commits into it. A `TreeMap` iterator is fail fast, so workers were surviving `ConcurrentModificationException` mid pass, and fail fast is documented as best effort, so the silent corruption behind it could not be ruled out either. Copying the window instead would destroy the laziness the whole index exists for, and taking the lock during selection would serialise the expensive part of a pass.
+
+A skip list is still an ordered map implementing `NavigableMap`, so range queries, `subMap` and the 5000 entry bound are all unchanged. What changes is that iteration is weakly consistent instead of fail fast.
+
+**Cost.** A probabilistic bound rather than a worst case one, and the structure is no longer a balanced tree, so the reason for choosing an ordered structure has to be stated as order versus a hash map rather than as a tree versus anything. Weakly consistent also means a drawn player may already have left, which is why the commit verifies rather than trusting the draw.
+
 ### One bucket per exact rating
 
 **Options.** One node per player, one per exact rating, or banded buckets spanning a range.
 
-**Chosen.** One per exact rating. Ratings run 1 to 5000, so the tree is bounded at 5000 nodes however many players queue. Banding would cut the buckets a query touches from about 201 to about 9 on a window of plus or minus 100, but a banded bucket holds players outside the window, so edges need filtering, and rating order inside a bucket is lost.
+**Chosen.** One per exact rating. Ratings run 1 to 5000, so the index is bounded at 5000 entries however many players queue. Banding would cut the buckets a query touches from about 201 to about 9 on a window of plus or minus 100, but a banded bucket holds players outside the window, so edges need filtering, and rating order inside a bucket is lost.
 
 **Cost.** A query touches more buckets than a banded index would.
 
@@ -153,6 +159,14 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 **Chosen.** `LinkedHashSet`. Arrival order is already wait time order, so the order needs preserving, not computing.
 
 **Cost.** The guarantee is implicit. It holds only because insertion happens to be chronological, and nothing in the type system says so.
+
+**Reversed, 10 September 2026, to `ConcurrentSkipListSet` ordered by wait time.** The same concurrent iteration problem as the map above, and a bucket iterator is live for far longer than the map's, since it stays open for the whole candidate walk.
+
+The implicit ordering cost disappears with it. The order is now a property of the type, which matters once players arrive over a message queue and delivery order stops being join order.
+
+**Cost.** Bucket operations become O(log n_b) rather than O(1), where n_b is the players at one exact rating. A hand rolled concurrent linked hash set would keep the O(1), and was rejected: the prize is roughly sixteen comparisons on a crowded bucket, the risk is a memory visibility bug that no single threaded test can catch, and no benchmark exists yet to say the bucket is hot at all.
+
+Equality inside a bucket is now the comparator's, queue time then id, rather than `Player.equals`, which is the id alone. That is safe only because removal looks the player up in the id map first and hands the bucket the object it filed.
 
 ### Empty buckets are deleted
 
@@ -180,7 +194,7 @@ Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper 
 
 A stream rather than an iterator because it composes: `flatMap`, `limit` and `takeWhile` come free, which is how tests flatten buckets back to players in one line and how the matcher stops early without a loop tracking its own count.
 
-**Cost.** The buckets handed out are live views, not copies, so the caller must finish drawing before mutating the index. Laziness and immunity to concurrent modification cannot both be had. The contract is documented and a test asserts the exception rather than a comment asserting the rule.
+**Cost.** The buckets handed out are live views, not copies. Since both levels became skip lists the draw no longer throws when another thread mutates the index, but it is still weakly consistent: a player drawn from it may already have left. The commit verifies for exactly that reason.
 
 ### No side index by player id
 
@@ -189,6 +203,12 @@ A stream rather than an iterator because it composes: `flatMap`, `limit` and `ta
 **Chosen.** No side index. Uniqueness becomes a rule upstream: a queued player must leave before queueing again.
 
 **Cost.** `SkillIndex` is not authoritative about its own contents. The same id inserted at two different ratings lands in two buckets and both inserts succeed, structurally the same defect that ended the AVL attempt. An upstream check is a policy, not a guarantee, and two threads can interleave through it. Due for revisit when the worker pool lands.
+
+**Reversed, 10 September 2026.** A map from id to player now sits beside the ordered map and is the authority on what is queued. The revisit was forced by the concurrency fix, which has to ask whether an id is still queued at all, and a rating keyed index can only answer whether a player is queued at a given rating.
+
+Three consequences. Insert refuses a duplicate id whatever rating a second join carries, which closes the orphan entry above. Remove takes the id as the address and ignores the rating on the argument, so a caller holding a player whose rating has since changed still removes the right entry. The player count is the map's size, so it cannot drift from the contents.
+
+**Cost.** Two structures that must stay in step, the same discipline the fairness heap already carries with its position map, and it fails silently when broken. Removing with a stale rating used to return false; it now succeeds, which reads like losing a check but is not, since nothing was reading that false.
 
 ## The domain model
 

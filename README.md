@@ -52,7 +52,7 @@ The engine is a standalone module with no web framework and no network code, so 
 
 ### Project status
 
-The core engine is built and tested: the skill index, the fairness heap and its widening window, and the matching pass itself, covered by 118 tests. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass itself, and the concurrency fix that lets several workers run it at once, covered by 136 tests. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -168,7 +168,7 @@ Not yet implemented.
 ## Limitations
 
 * Matching is greedy. It can miss a valid lobby that exists elsewhere in the queue.
-* `SkillIndex` is keyed by rating, so uniqueness is enforced upstream rather than guaranteed by the index.
+* Every commit serialises through one lock, so the engine scales by making passes cheap rather than by running more of them. Sharding the queue by rating band is the recorded next step.
 * No performance measurement exists. Every stated cost is derived from the structures, not observed.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

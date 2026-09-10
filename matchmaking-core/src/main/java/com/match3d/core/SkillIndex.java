@@ -12,8 +12,9 @@ import java.util.stream.Stream;
 
 /**
  * Queued players in rating order, answering "everyone rated between low and
- * high". One bucket per rating, so the tree is bounded by the 5000 possible
- * ratings however many players queue. Buckets hold wait time order.
+ * high". An ordered map keyed by rating, one bucket per rating, so it is
+ * bounded by the 5000 possible ratings however many players queue. Buckets
+ * hold wait time order.
  *
  * With nr occupied ratings, nb players in a bucket and b buckets in a window:
  * insert and remove are O(log nr + log nb), playersInRange is O(log nr + b)
@@ -21,14 +22,14 @@ import java.util.stream.Stream;
  *
  * A bucket exists if and only if it holds a player.
  *
- * The id map beside the tree is the authority on what is queued. Every
- * mutation touches both it and a bucket, in insert and remove and nowhere
- * else. A write reaching one without the other corrupts the index silently.
+ * The id map beside it is the authority on what is queued. Every mutation
+ * touches both it and a bucket, in insert and remove and nowhere else. A write
+ * reaching one without the other corrupts the index silently.
  *
- * The tree and the buckets are concurrent, so a caller may iterate a window
- * while another thread mutates the index: iteration is weakly consistent and
- * never throws, and a drawn player may already have left. Mutation still needs
- * the caller's mutual exclusion, since a pass spans several structures.
+ * Both levels are skip lists, so a window may be iterated while another thread
+ * mutates the index: iteration is weakly consistent and never throws, and a
+ * drawn player may already have left. Mutation still needs the caller's mutual
+ * exclusion, since a pass spans several structures.
  */
 public final class SkillIndex {
 

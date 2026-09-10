@@ -94,26 +94,26 @@ Adding a candidate folds all four forward and the set is valid while the reach s
 
 ## The skill index
 
-`SkillIndex` answers who is queued between two ratings. It is a `TreeMap` from rating to a bucket of the players at that rating.
+`SkillIndex` answers who is queued between two ratings. It is a `ConcurrentSkipListMap` from rating to a bucket of the players at that rating.
 
 ```mermaid
 flowchart LR
-    subgraph tree["TreeMap, one node per occupied rating"]
+    subgraph index["ConcurrentSkipListMap, one entry per occupied rating"]
         direction TB
         k1440["1440"]
         k1500["1500"]
         k1520["1520"]
     end
-    k1440 --> b1["LinkedHashSet: D"]
-    k1500 --> b2["LinkedHashSet: A, F, G"]
-    k1520 --> b3["LinkedHashSet: E"]
+    k1440 --> b1["bucket: D"]
+    k1500 --> b2["bucket: A, F, G"]
+    k1520 --> b3["bucket: E"]
 ```
 
-One node per rating rather than per player, so with ratings running 1 to 5000 the tree is bounded at 5000 nodes however many players queue. Buckets are `LinkedHashSet`, so players inside one sit in arrival order, which is already wait time order. Nothing is sorted.
+One entry per rating rather than per player, so with ratings running 1 to 5000 the index is bounded at 5000 entries however many players queue. Buckets are `ConcurrentSkipListSet` ordered by wait time, so the ordering the merge depends on is a property of the type rather than a consequence of arrivals happening to be chronological.
 
 Insert creates a bucket immediately before adding to it, remove deletes one the moment it empties, and both take a single traversal. The invariant is that a bucket exists exactly while it holds a player, and `ratingCount` is exposed so a test can prove empty buckets are deleted rather than merely emptied.
 
-`playersInRange` returns a lazy stream of the buckets between two inclusive bounds, each an unmodifiable view. It builds nothing: a mid distribution window can hold thousands of players when a lobby seats ten. The price is that those views are live, so the caller must finish drawing before mutating the index. A test asserts the concurrent modification exception rather than a comment asserting the rule.
+`playersInRange` returns a lazy stream of the buckets between two inclusive bounds, each an unmodifiable view. It builds nothing: a mid distribution window can hold thousands of players when a lobby seats ten. Those views are live, and because both levels are skip lists the iteration is weakly consistent: it never throws while another thread mutates the index, and a player drawn from it may already have left. Verifying at commit is what makes that safe, not the draw itself.
 
 ## Fairness and the widening window
 
@@ -198,11 +198,12 @@ Three immutable records.
 
 ## Cost of each operation
 
-Three counts, kept apart. `n_r` is the number of occupied ratings, which is the tree's size, bounded at 5000. `b` is the number of buckets in a query window. `n_p` is the number of queued players, which appears in the heap costs only and never in an index query.
+Four counts, kept apart. `n_r` is the number of occupied ratings, bounded at 5000. `n_b` is the number of players in one bucket. `b` is the number of buckets in a query window. `n_p` is the number of queued players, which appears in the heap costs only and never in an index query.
 
 | Operation | Cost |
 |---|---|
-| `SkillIndex.insert`, `SkillIndex.remove` | O(log n_r) |
+| `SkillIndex.insert`, `SkillIndex.remove` | O(log n_r + log n_b) |
+| `SkillIndex.contains` | O(1) |
 | `SkillIndex.playersInRange`, seeding the merge | O(log n_r + b) |
 | `WaitTimeMerge`, per player drawn | O(log b) |
 | `FairnessHeap.insert`, `poll`, `remove` | O(log n_p) |
