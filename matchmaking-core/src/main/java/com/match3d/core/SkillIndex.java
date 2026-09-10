@@ -1,10 +1,13 @@
 package com.match3d.core;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.stream.Stream;
 
 /**
@@ -19,36 +22,66 @@ import java.util.stream.Stream;
  * number of queued players.
  *
  * A bucket exists if and only if it holds a player.
+ *
+ * A map from id to player sits beside the tree. It makes a lookup by id
+ * constant time rather than a walk of the buckets.
+ *
+ * Every mutation touches both the map and a bucket, in insert and remove and
+ * nowhere else. A write reaching one without the other corrupts the index
+ * silently.
+ *
+ * Not synchronised. A caller running it under contention supplies the mutual
+ * exclusion.
  */
 public final class SkillIndex {
 
     private final NavigableMap<Integer, Set<Player>> byRating = new TreeMap<>();
-    private int playerSize = 0;
+    private final Map<UUID, Player> byId = new HashMap<>();
 
     /**
      * Adds a player, creating their rating's bucket if it is absent.
      *
-     * Returns false if the player was already queued at that rating.
+     * Returns false if that id is already queued.
      */
     public boolean insert(Player player) {
-        boolean added = byRating.computeIfAbsent(player.rating(), r -> new LinkedHashSet<>()).add(player);
-        if (added) playerSize++;
-        return added;
+        if (byId.containsKey(player.id())) return false;
+        byRating.computeIfAbsent(player.rating(), r -> new LinkedHashSet<>()).add(player);
+        byId.put(player.id(), player);
+        return true;
+    }
+
+    /**
+     * Removes a player by id, deleting their bucket if it is left empty.
+     *
+     * Returns false if that id is not queued.
+     */
+    public boolean remove(UUID id) {
+        Player queued = byId.remove(id);
+        if (queued == null) return false;
+
+        byRating.computeIfPresent(queued.rating(), (rating, bucket) -> {
+            bucket.remove(queued);
+            return bucket.isEmpty() ? null : bucket;
+        });
+        return true;
     }
 
     /**
      * Removes a player, deleting their rating's bucket if it is left empty.
      *
-     * Returns false if the player was not queued at that rating.
+     * The rating on the argument is ignored, the id is the address.
+     *
+     * Returns false if that id is not queued.
      */
     public boolean remove(Player player) {
-        boolean[] removed = {false};
-        byRating.computeIfPresent(player.rating(), (rating, bucket) -> {
-            removed[0] = bucket.remove(player);
-            return bucket.isEmpty() ? null : bucket;
-        });
-        if (removed[0]) playerSize--;
-        return removed[0];
+        return remove(player.id());
+    }
+
+    /**
+     * Whether that id is currently queued, at any rating.
+     */
+    public boolean contains(UUID id) {
+        return byId.containsKey(id);
     }
 
     /**
@@ -76,7 +109,7 @@ public final class SkillIndex {
      * The number of players currently queued, across all ratings.
      */
     public int playerCount() {
-        return playerSize;
+        return byId.size();
     }
 
     /**
