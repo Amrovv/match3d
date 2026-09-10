@@ -6,19 +6,56 @@ Only built work appears here. New sections go at the top as they land, so the mo
 
 ## Contents
 
-1. [Forming a lobby](#forming-a-lobby)
-2. [The consent check](#the-consent-check)
-3. [The skill index](#the-skill-index)
-4. [Fairness and the widening window](#fairness-and-the-widening-window)
-5. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
-6. [The domain model](#the-domain-model)
-7. [Cost of each operation](#cost-of-each-operation)
-8. [Verification](#verification)
-9. [The build and the pipeline](#the-build-and-the-pipeline)
+1. [Matching under contention](#matching-under-contention)
+2. [Forming a lobby](#forming-a-lobby)
+3. [The consent check](#the-consent-check)
+4. [The skill index](#the-skill-index)
+5. [Fairness and the widening window](#fairness-and-the-widening-window)
+6. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
+7. [The domain model](#the-domain-model)
+8. [Cost of each operation](#cost-of-each-operation)
+9. [Verification](#verification)
+10. [The build and the pipeline](#the-build-and-the-pipeline)
+
+## Matching under contention
+
+Several worker threads run the pass against one shared engine. The expensive part of a pass is selecting candidates, and the cheap part is committing them, so the lock covers the cheap part only.
+
+```mermaid
+flowchart TD
+    poll["Under the lock:<br/>drain cooled, poll the anchor,<br/>claim them out of the index"] --> select
+    select["Outside the lock:<br/>walk the window, seat ten"] --> verify
+    verify{"Under the lock:<br/>are the recruits still queued?"}
+    verify -- "all ten" --> commit["Remove all ten. Lobby"]
+    verify -- "some taken, budget left" --> drop["Drop them, spend a retry"]
+    drop --> resume["Outside the lock:<br/>resume the walk"]
+    resume --> verify
+    verify -- "some taken, budget spent" --> cool["Cool the anchor"]
+    verify -- "selection came up short" --> cool
+```
+
+**The race this closes.** Two workers select overlapping members and both commit them, so one player is seated in two lobbies. Between choosing members and removing them the chosen players are still visible to every other worker, and nothing records that anyone has claimed them. It fails silently: removal returns false for a player already gone and the commit loop ignores it, so both lobbies are internally valid and both are returned.
+
+**The commit is all or nothing.** Ten removals happen only if all ten recruits are still queued. A worker that loses has therefore taken nothing and owes nothing, which is what removes the need for a rollback.
+
+**The anchor is claimed, the recruits are not.** Polling takes the anchor out of the heap and the index, so no other worker can recruit them mid pass. Without it, anchors were the most contested players in the queue: they are the longest waiters, and the merge offers longest waiters first. A cooled anchor is returned to the index, since cooling bars anchoring rather than recruitment, and any abnormal exit returns them to both structures.
+
+**A pass ends four ways**, counted separately: a lobby forms, the anchor could not fill one, the anchor spent its budget losing recruits, or the anchor was itself matched elsewhere. The last is impossible while the claim holds, and a test asserts it stays at zero.
+
+**A retry resumes rather than restarts.** `Selection` holds the anchor, the merge cursor and the consent state for one pass. Losing a recruit drops them and refolds consent from those left, then the walk continues from where it stopped. Rebuilding instead would re-seed every bucket in the window, which is what a whole fresh pass costs.
+
+| 20k players, normal spread, 8 workers | lobbies in 100ms |
+|---|---|
+| rebuilding the walk each retry | 399 |
+| resuming it | 988 |
+
+Fifteen repeats each, from `./gradlew :matchmaking-core:benchmark`. What it buys is on the retry path only; both variants match the whole queue given enough time.
+
+**What the structures guarantee and what they do not.** The index and its buckets are skip lists, so a worker may walk a window while another mutates it: iteration never throws and a drawn player may already have left. That is what makes selection outside the lock legal. It is not enough on its own, because a pass spans the index, the heap and the cooldown queue, and per structure safety cannot make a span atomic. The lock does that.
 
 ## Forming a lobby
 
-`MatchMaker` makes one attempt per call and takes the current instant as a parameter, so it never reads a clock. Its only state is the queue of anchors sitting out a cooldown.
+`MatchMaker` works one anchor per call and takes the current instant as a parameter, so it never reads a clock. Its state is the cooldown queue and the commit lock. The diagram below is the uncontended path; what happens when a recruit is taken mid pass is above.
 
 ```mermaid
 flowchart TD
@@ -210,14 +247,19 @@ Four counts, kept apart. `n_r` is the number of occupied ratings, bounded at 500
 | `FairnessHeap.peek`, `contains`, `size` | O(1) |
 | `WideningFunction.ratingRadius` | O(1) |
 | `Overlap`, per candidate tested | O(1) |
+| `SkillIndex.contains`, verifying one recruit | O(1) |
+| Seeding a `Selection`, once per pass | O(log n_r + b) |
+| Resuming one after a lost recruit | O(1) per seat refolded, no re-seed |
 
 Derived from the structures, not measured. No throughput or latency figure appears anywhere in this repository, because no benchmark exists that someone cloning it could reproduce.
 
 ## Verification
 
-118 tests over the eight core classes. Every one was checked by injecting the bug it exists to catch and confirming the suite goes red: thirteen mutations across four classes, applied one at a time and reverted. All thirteen were caught.
+146 tests over the nine core classes, plus a benchmark that reports rather than asserts. Every test was checked by injecting the bug it exists to catch and confirming the suite goes red, one mutation at a time, reverted after each.
 
-Two results are worth more than the count. Dropping the id tiebreak was caught by the heap's tie test and not by the merge's, because without it the order of equal elements is unspecified rather than wrong, so that test passes or fails by luck. And the cooldown defect above is caught by exactly one test, having been found by reasoning rather than by anything failing. Both matter when this code becomes concurrent.
+Two results are worth more than the count. Dropping the id tiebreak was caught by the heap's tie test and not by the merge's, because without it the order of equal elements is unspecified rather than wrong, so that test passes or fails by luck. And swapping the buckets back to a type that preserves insertion order is caught by exactly one test, the one that inserts out of chronological order, because every other ordering test inserts in order and passes either way.
+
+The concurrent tests read the structures after the workers have stopped rather than trying to catch an interleaving, since the evidence a race leaves is permanent while its timing is not. Two of them exist to keep the harness honest rather than the engine: one fails if a run produces no retries at all, which is what tells a working fix apart from one that was never contended, and one fails if any pass abandoned its anchor, which is the invariant the claim exists to provide.
 
 ## The build and the pipeline
 

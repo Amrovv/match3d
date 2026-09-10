@@ -8,11 +8,60 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Selecting a lobby](#selecting-a-lobby)
-2. [Fairness and waiting](#fairness-and-waiting)
-3. [Indexing players by skill](#indexing-players-by-skill)
-4. [The domain model](#the-domain-model)
-5. [Repository and build](#repository-and-build)
+1. [Matching under contention](#matching-under-contention)
+2. [Selecting a lobby](#selecting-a-lobby)
+3. [Fairness and waiting](#fairness-and-waiting)
+4. [Indexing players by skill](#indexing-players-by-skill)
+5. [The domain model](#the-domain-model)
+6. [Repository and build](#repository-and-build)
+
+## Matching under contention
+
+### Optimistic selection, exclusive commit
+
+**Options.** One lock held across the whole pass, a lock per structure, or an unsynchronised selection verified under a lock.
+
+**Chosen.** Verify. A lock per structure closes nothing, because the race lives in the gaps between individually atomic operations: the unit of safety is a span, not an object. That leaves a span, and the span that covers everything is the whole pass, which is also where all the time goes. Selection seeds a merge over every bucket in the window; the commit is ten removals. Locking selection makes eight workers behave as one.
+
+The two problems with an unsynchronised selection are that it reads live views and that its result is stale by commit time. Neither says no other worker may select at once. Both say a selection cannot be trusted when it is committed, which is a verification requirement, and verifying is cheap where excluding is not.
+
+**Cost.** Wasted work under contention, and a second correctness argument to hold: the structures are safe because the lock covers every mutation, and the outcome is correct because the commit verifies. Neither alone is enough.
+
+### Nothing is removed unless all ten verify
+
+**Options.** Claim and remove members as they are confirmed, or verify all ten and remove none unless all survive.
+
+**Chosen.** All or nothing. Incremental claiming leaves a worker that then fails holding players who are in no lobby and in no queue. That deletes a player where the original race merely duplicated one, and it is only safe with a release step that a dying worker never performs.
+
+**Cost.** A worker can do a full selection and commit nothing.
+
+### The anchor is claimed, the members are not
+
+**Options.** Leave the anchor in the index while a worker builds around them, or remove them for the duration of the pass.
+
+**Chosen.** Claim. Anchors are the longest waiters and the merge offers those first, so every worker's candidate draw began with the other workers' anchors. Measured over ten rounds at maximum contention, 464 passes were abandoned because the anchor had been recruited elsewhere, and the retry path never executed once.
+
+**Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued player is in exactly one place at any moment, which is also what party matching will need.
+
+### A retry budget of the seats standing
+
+**Options.** Abandon the pass when a member is taken, retry without limit, or retry a bounded number of times.
+
+**Chosen.** Bounded, and the bound is the number of seats still standing at the first failed verify, so a nearly complete lobby is worth more persistence than a bare one. It is set once. Recomputing it from a later, fuller selection lets it grow, and the loop stops terminating under exactly the contention it exists for.
+
+Retrying is for contention, where another worker committed and the index has changed. A refill that finds nobody is starvation, where nothing has changed and asking again microseconds later returns the same answer, so that cools instead.
+
+**Cost.** A selection that starts at three seats and grows to nine keeps the budget of three, so a lobby that became valuable mid pass is not credited for it. Termination is worth more than the credit.
+
+### A retry resumes the walk rather than re-seeding it
+
+**Options.** Rebuild the candidate merge for each attempt, or carry the cursor and the consent state across attempts.
+
+**Chosen.** Carry them. Seeding touches every occupied rating in the window and is the expensive part of a pass; seating a player is a logarithm in the bucket count. Rebuilding to save nine constant time consent checks made a retry cost what a whole fresh pass costs, which is why the first version of the retry loop measured no better than abandoning.
+
+20k players, normal spread, eight workers, fifteen repeats: 399 lobbies in 100ms rebuilding, 988 resuming.
+
+**Cost.** A resumed walk cannot reconsider. Dropping a member widens the reach, so a candidate rejected earlier might be acceptable now, and the cursor has already passed them. A resumed pass can therefore fail to fill where a fresh one would have succeeded. Ratings that become occupied after seeding are also invisible for the rest of the pass, which is consistent with the pass already fixing its own instant.
 
 ## Selecting a lobby
 
@@ -50,6 +99,8 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
+**Amended, 10 September 2026.** Still one anchor per call, but no longer one attempt: a pass that loses a member to another worker refills and verifies again, within a budget. The termination argument survives, since the budget is set once and decremented, and every call still shrinks the heap.
+
 ### A fixed cooldown for failed anchors
 
 **Options.** Reinsert immediately, a fixed period, or a period growing with each failure.
@@ -57,6 +108,8 @@ This looked like it would force backtracking and nearly forced a redesign away f
 **Chosen.** Fixed at 10 seconds. Immediate reinsertion fails outright, since the heap orders by queue time and reinsertion does not change it, so the same player returns on the very next call. Growing cooldowns point the wrong way: the repeat failer is the player furthest from the rating mass, precisely who the heap protects, and the moment they become matchable is uncorrelated with their failure count. Queue time is untouched while they sit out, so they return to the front with a wider radius.
 
 **Cost.** 10 seconds is a constant with nothing behind it, and no failure count is stored, so a player failing repeatedly goes unnoticed.
+
+**Amended, 10 September 2026.** The period is a constructor argument now, defaulting to the same ten seconds. It is policy rather than physics, and a cooldown longer than a measurement window makes the measurement about the cooldown. Cooling also records its cause, since an anchor with no lobby available and an anchor that lost too many races are different facts about the queue wearing the same treatment.
 
 ### Cooling bars anchoring, not matching
 
