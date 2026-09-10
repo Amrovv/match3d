@@ -1,7 +1,6 @@
 package com.match3d.core;
 
 import java.time.Instant;
-import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -298,14 +297,15 @@ class SkillIndexTest {
                 "One fat bucket must not be walked to its end, the matcher relies on stopping early");
     }
 
-    @Test void testRangeThrowsIfTheIndexIsMutatedMidDrawNeg() {
+    @Test void testRangeToleratesMutationMidDraw() {
         for (int rating = 1000; rating < 1010; rating++) {
             index.insert(player(rating));
         }
 
-        assertThrows(ConcurrentModificationException.class,
+        assertDoesNotThrow(
                 () -> index.playersInRange(1000, 1009).flatMap(Set::stream).forEach(index::remove),
-                "The window is a live view, so the caller must finish drawing before it mutates");
+                "The window is weakly consistent, so mutating mid draw does not throw");
+        assertEquals(0, index.playerCount(), "The draw still reached every player");
     }
 
     // counters

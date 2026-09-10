@@ -2,12 +2,12 @@ package com.match3d.core;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.stream.Stream;
 
 /**
@@ -15,9 +15,9 @@ import java.util.stream.Stream;
  * high". One bucket per rating, so the tree is bounded by the 5000 possible
  * ratings however many players queue. Buckets hold wait time order.
  *
- * With nr occupied ratings and b buckets in a window: insert and remove are
- * O(log nr), playersInRange is O(log nr + b) and lazy. No term is the number
- * of queued players.
+ * With nr occupied ratings, nb players in a bucket and b buckets in a window:
+ * insert and remove are O(log nr + log nb), playersInRange is O(log nr + b)
+ * and lazy. No term is the number of queued players.
  *
  * A bucket exists if and only if it holds a player.
  *
@@ -25,17 +25,20 @@ import java.util.stream.Stream;
  * mutation touches both it and a bucket, in insert and remove and nowhere
  * else. A write reaching one without the other corrupts the index silently.
  *
- * Not synchronised. The caller supplies mutual exclusion.
+ * The tree and the buckets are concurrent, so a caller may iterate a window
+ * while another thread mutates the index: iteration is weakly consistent and
+ * never throws, and a drawn player may already have left. Mutation still needs
+ * the caller's mutual exclusion, since a pass spans several structures.
  */
 public final class SkillIndex {
 
-    private final NavigableMap<Integer, Set<Player>> byRating = new TreeMap<>();
+    private final NavigableMap<Integer, Set<Player>> byRating = new ConcurrentSkipListMap<>();
     private final Map<UUID, Player> byId = new HashMap<>();
 
     /** Adds a player. False if that id is already queued, at any rating. */
     public boolean insert(Player player) {
         if (byId.containsKey(player.id())) return false;
-        byRating.computeIfAbsent(player.rating(), r -> new LinkedHashSet<>()).add(player);
+        byRating.computeIfAbsent(player.rating(), r -> newBucket()).add(player);
         byId.put(player.id(), player);
         return true;
     }
@@ -55,6 +58,14 @@ public final class SkillIndex {
     /** The rating on the argument is ignored, the id is the address. */
     public boolean remove(Player player) {
         return remove(player.id());
+    }
+
+    /**
+     * Wait time order is the comparator's, not insertion order, so a bucket is
+     * ordered by definition rather than by arrivals happening to be in order.
+     */
+    private static Set<Player> newBucket() {
+        return new ConcurrentSkipListSet<>(Player.BY_WAIT_TIME);
     }
 
     /** Whether that id is queued, at any rating. */
