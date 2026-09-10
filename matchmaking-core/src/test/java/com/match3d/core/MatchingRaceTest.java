@@ -159,6 +159,33 @@ class MatchingRaceTest {
         }
     }
 
+    // proof the run was actually contended
+
+    @Test void testTheWorkersActuallyRacedEachOther() throws InterruptedException {
+        // Without this, a green suite cannot be told apart from a suite that
+        // stopped contending: a narrower spread, fewer workers or a shorter run
+        // would all pass silently while proving nothing. A retry only happens
+        // when a verify found a member another worker had already taken.
+        int retries = 0;
+        for (int r = 0; r < ROUNDS; r++) {
+            retries += round().matcher().retryCount();
+        }
+
+        assertTrue(retries > 0,
+                "Eight workers on one bucket must collide, so a run with no retry at all"
+                        + " means the harness has stopped exercising the race");
+    }
+
+    @Test void testAnAnchorIsNeverTakenByAnotherWorker() throws InterruptedException {
+        // The anchor is claimed out of the index at poll, so no other worker
+        // can see them to recruit them. Before that claim this fired on roughly
+        // three passes in five.
+        for (int r = 0; r < ROUNDS; r++) {
+            assertEquals(0, round().matcher().abortCount(),
+                    "A claimed anchor cannot be recruited, so no pass should abandon one");
+        }
+    }
+
     // what the workers survived
 
     @Test void testNoWorkerFailed() throws InterruptedException {

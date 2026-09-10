@@ -347,6 +347,19 @@ class MatchMakerTest {
         assertEquals(0, matcher.retryCount(), "There was nothing to retry");
     }
 
+    @Test void testAClaimedAnchorIsInvisibleToTheIndexUntilTheyAreSettled() {
+        // The anchor is claimed out of both structures at poll, so a failed
+        // pass has to put them back or they are stranded in neither.
+        List<Player> queued = joinCluster(1000, 9);
+
+        matcher.formLobby(NOW);
+
+        assertEquals(9, index.playerCount(), "The claimed anchor was returned to the index");
+        assertTrue(index.contains(queued.get(0).id()),
+                "And it is the anchor specifically, the longest waiter");
+        assertEquals(8, heap.size(), "They are cooling, so the heap does not hold them yet");
+    }
+
     // clock skew
 
     @Test void testAQueueTimeInTheFutureIsTreatedAsNoWait() {

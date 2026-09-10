@@ -90,54 +90,75 @@ public final class MatchMaker {
 
         List<Player> members = selectMembers(anchor, now);
 
+        boolean settled = false;
         int budget = -1;
-        while (true) {
-            commitLock.lock();
-            try {
-                if (members.size() < LOBBY_SIZE) {
-                    cool(anchor, now, false);
-                    return Optional.empty();
-                }
-                List<Player> missing = missing(members);
+        try {
+            while (true) {
+                commitLock.lock();
+                try {
+                    if (members.size() < LOBBY_SIZE) {
+                        cool(anchor, now, false);
+                        settled = true;
+                        return Optional.empty();
+                    }
+                    List<Player> missing = missing(members);
 
-                if (missing.isEmpty()) {
-                    commit(members);
-                    return Optional.of(new Lobby(members));
-                }
+                    if (missing.isEmpty()) {
+                        commit(members);
+                        settled = true;
+                        return Optional.of(new Lobby(members));
+                    }
 
-                if (missing.contains(anchor)) {
-                    aborts++;
-                    return Optional.empty();
-                }
+                    if (missing.contains(anchor)) {
+                        aborts++;
+                        return Optional.empty();
+                    }
 
-                if (budget < 0) {
-                    budget = members.size() - missing.size();
-                }
-                if (budget == 0) {
-                    cool(anchor, now, true);
-                    return Optional.empty();
-                }
+                    if (budget < 0) {
+                        budget = members.size() - missing.size();
+                    }
+                    if (budget == 0) {
+                        cool(anchor, now, true);
+                        settled = true;
+                        return Optional.empty();
+                    }
 
-                budget--;
-                retries++;
-                members.removeAll(missing);
-            } finally {
-                commitLock.unlock();
+                    budget--;
+                    retries++;
+                    members.removeAll(missing);
+                } finally {
+                    commitLock.unlock();
+                }
+                refill(members, now);
             }
-            refill(members, now);
+        } finally {
+            if (!settled) {
+                commitLock.lock();
+                try {
+                    index.insert(anchor);
+                    heap.insert(anchor);
+                }
+                finally {
+                    commitLock.unlock();
+                }
+            }
         }
     }
 
     /** Under the lock. Drains cooled anchors, then polls one. Null if none. */
     private Player drainAndPoll(Instant now) {
         drainCooled(now);
-        return heap.poll();
+        Player anchor = heap.poll();
+        if (anchor != null) {
+            index.remove(anchor);
+        }
+        return anchor;
     }
 
     /** Under the lock. Members no longer queued, empty if all ten survive. */
     private List<Player> missing(List<Player> members) {
         List<Player> missing = new ArrayList<>();
-        for (int i = 0; i < members.size(); i++) {
+        for (int i = 1; i < members.size(); i++) {
             Player member = members.get(i);
             if (!index.contains(member.id())) missing.add(member);
         }
@@ -158,16 +179,8 @@ public final class MatchMaker {
      * Under the lock. A matched anchor is counted as an abort rather than
      * cooled, since cooling would return them to the heap.
      */
-    /**
-     * Under the lock. A matched anchor is counted as an abort rather than
-     * cooled, since cooling would return them to the heap.
-     */
     private void cool(Player anchor, Instant now, boolean lostToContention) {
-        if (!index.contains(anchor.id())) {
-            aborts++;
-            return;
-        }
-
+        index.insert(anchor);
         if (lostToContention) contentionCooldowns++;
         else starvationCooldowns++;
         cooling.add(new Pending(anchor, now.plus(cooldown)));
