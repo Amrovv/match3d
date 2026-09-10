@@ -6,9 +6,9 @@ import java.util.UUID;
 import java.util.Comparator;
 
 /**
- * A player waiting in the queue.
- * Immutable, several workers can hold references to the same player object. 
- * Identity is the id alone.
+ * A player waiting in the queue. Immutable, so several workers may hold the
+ * same object. Identity is the id alone, so a player rebuilt elsewhere with a
+ * different timestamp is still the same player.
  */
 public record Player(UUID id, int rating, Instant queuedAt) {
 

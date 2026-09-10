@@ -13,16 +13,12 @@ import java.util.PriorityQueue;
 import java.util.Comparator;
 
 /**
- * Players from several buckets in one wait time order, longest waiting first.
+ * Players from several already ordered buckets in one wait time order, longest
+ * waiting first. A k way merge over the bucket heads: O(b) to seed b buckets,
+ * then O(log b) per player drawn.
  *
- * Each bucket is already ordered, so a k way merge over the bucket heads gives
- * the global order without sorting: O(b) to seed b buckets, then O(log b) per
- * player drawn. Sorting the window instead would cost O(m log m) over every
- * candidate in it, to seat nine.
- *
- * Lazy, so a caller that stops early never pays for the players it did not
- * draw. Seeding takes one reference and one head player from each bucket, and
- * everyone behind a head is untouched until they are drawn.
+ * Lazy. Seeding takes one cursor and one head per bucket, and a caller that
+ * stops early never pays for the rest.
  */
 public final class WaitTimeMerge {
 
@@ -30,35 +26,26 @@ public final class WaitTimeMerge {
     }
 
     /**
-     * One cursor per bucket, the player each cursor currently offers, and a
-     * heap saying which of those players has waited longest.
-     *
-     * heads and sources are parallel, heads.get(i) came from sources.get(i), so
-     * neither list may be reordered. A null head means that bucket is spent.
+     * heads and sources are parallel, so neither list may be reordered. A null
+     * head means that bucket is spent.
      */
     private static final class MergeIterator implements Iterator<Player> {
 
-        /** A cursor per bucket, each walking over the players in one bucket. */
+        /** A cursor per bucket. */
         private final List<Iterator<Player>> sources = new ArrayList<>();
 
         /** The player currently at the front of each bucket, null if spent. */
         private final List<Player> heads = new ArrayList<>();
 
         /**
-         * Bucket indices, ordered by the head each one currently holds.
-         *
-         * Indices rather than players, so heads and sources are never reordered.
-         * An index is present if and only if its head is a player.
+         * Bucket indices, ordered by the head each holds. Indices rather than
+         * players so the parallel lists stay put. Present iff its head is a
+         * player.
          */
         private final PriorityQueue<Integer> indexHeap =
                 new PriorityQueue<>(Comparator.comparing(heads::get, Player.BY_WAIT_TIME));
 
-        /**
-         * Seeds one cursor and one head per bucket.
-         *
-         * Both lists are appended in the same loop turn, which is what keeps
-         * their indices in step. An empty bucket is left out of the heap.
-         */
+        /** Both lists are appended in the same turn, keeping indices in step. */
         MergeIterator(Stream<Set<Player>> buckets) {
             for (Set<Player> bucket : buckets.toList()) {
                 Iterator<Player> source = bucket.iterator();
@@ -76,12 +63,8 @@ public final class WaitTimeMerge {
         }
 
         /**
-         * The longest waiting head across every live bucket.
-         *
-         * Only the winning bucket is advanced, so a draw is O(log b). A spent
-         * bucket is not pushed back and drops out of the merge for good.
-         *
-         * Throws NoSuchElementException if every bucket is spent.
+         * The longest waiting head. Only the winning bucket advances, and a
+         * spent one is never pushed back. Throws if every bucket is spent.
          */
         @Override
         public Player next() {
@@ -100,12 +83,8 @@ public final class WaitTimeMerge {
     }
 
     /**
-     * A stream of buckets ordered by rating goes in, a stream of players
-     * ordered by wait time comes out.
-     *
-     * The caller never sees the buckets, and the ordered sequence it draws from
-     * exists nowhere in memory, it is produced one player at a time on demand.
-     * A caller taking n players pays for n draws and nothing more.
+     * Buckets by rating in, players by wait time out. The ordered sequence is
+     * produced on demand and exists nowhere in memory.
      *
      * Seeding consumes the bucket stream, so the index must not be mutated
      * until the returned stream has been drawn from.
@@ -115,11 +94,8 @@ public final class WaitTimeMerge {
     }
 
     /**
-     * Wraps a merging iterator as a lazy stream.
-     *
-     * Unknown size because counting the players across the buckets would mean
-     * walking them. Sequential, because parallel would destroy the ordering
-     * this class exists to provide.
+     * Unknown size, since counting would mean walking. Sequential, since
+     * parallel would destroy the ordering this class exists to provide.
      */
     private static Stream<Player> lazily(Iterator<Player> merged) {
         return StreamSupport.stream(

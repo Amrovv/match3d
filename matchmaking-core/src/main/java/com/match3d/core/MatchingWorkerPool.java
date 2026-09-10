@@ -10,15 +10,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * Several threads running the matching pass against one shared engine.
  *
- * A test instrument rather than a production caller. Workers spin rather than back
- * off, because the point is maximum contention on the shared structures, and
- * nothing here is synchronised, because we must to observe the race
- * before fixing it.
+ * A test instrument, not a production caller. Workers spin rather than back
+ * off, since the point is maximum contention. Nothing here is synchronised:
+ * safety belongs to the engine, not to the harness driving it.
  *
- * Each worker collects into its own private list, so the harness shares no
- * mutable state and cannot lose or duplicate a lobby of its own accord. The
- * lists are merged on the calling thread after every worker has stopped, so
- * any race the test observes belongs to the engine.
+ * Each worker collects into a private list, merged on the calling thread once
+ * every worker has stopped, so any race observed belongs to the engine.
  */
 public final class MatchingWorkerPool {
 
@@ -36,19 +33,11 @@ public final class MatchingWorkerPool {
         this.threads = Executors.newFixedThreadPool(workerCount);
     }
 
-    /**
-     * One run of the pool: every lobby formed, and every exception a worker
-     * survived.
-     *
-     * Both lists are merged from per worker lists after every worker has
-     * stopped, so neither is written concurrently.
-     */
+    /** Every lobby formed, and every exception a worker survived. */
     public record Run(List<Lobby> lobbies, List<RuntimeException> failures) {
     }
 
-    /**
-     * Starts every worker. Each spins on formLobby until stop is called.
-     */
+    /** Starts every worker. Each spins on formLobby until stop is called. */
     public void start() {
         running = true;
         for (int i = 0; i < workerCount; i++) {
@@ -70,12 +59,10 @@ public final class MatchingWorkerPool {
     }
 
     /**
-     * Stops every worker and returns everything the run produced, in no
-     * particular order.
+     * Stops every worker and returns the run, in no particular order.
      *
-     * awaitTermination is what makes the merge safe: it guarantees no worker is
-     * still inside formLobby, and it establishes the happens before edge that
-     * makes each worker's writes visible to the caller.
+     * awaitTermination makes the merge safe: no worker is still inside
+     * formLobby, and it gives the happens before edge for their writes.
      */
     public Run stop() throws InterruptedException {
         running = false;
