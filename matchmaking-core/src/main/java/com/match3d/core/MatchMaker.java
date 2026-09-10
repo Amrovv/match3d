@@ -24,7 +24,12 @@ public final class MatchMaker {
     /** Players per lobby, five a side. */
     static final int LOBBY_SIZE = 10;
 
-    /** How long a failed anchor sits out before the heap sees them again. */
+    /**
+     * How long a failed anchor sits out before the heap sees them again.
+     *
+     * A policy rather than a physical constant, so it is configurable and this
+     * is only the default.
+     */
     static final Duration COOLDOWN = Duration.ofSeconds(10);
 
     private final ReentrantLock commitLock = new ReentrantLock();
@@ -42,9 +47,21 @@ public final class MatchMaker {
     /** Failed anchors, soonest ready first. */
     private final PriorityQueue<Pending> cooling = new PriorityQueue<>(BY_READY_AT);
 
+    private int retries = 0;
+    private int contentionCooldowns = 0;
+    private int starvationCooldowns = 0;
+    private int aborts = 0;
+
+    private final Duration cooldown;
+
     public MatchMaker(SkillIndex index, FairnessHeap heap) {
+        this(index, heap, COOLDOWN);
+    }
+
+    public MatchMaker(SkillIndex index, FairnessHeap heap, Duration cooldown) {
         this.index = index;
         this.heap = heap;
+        this.cooldown = cooldown;
     }
 
     /**
@@ -72,7 +89,12 @@ public final class MatchMaker {
                 cool(anchor, now, false);
                 return Optional.empty();
             }
-            if (!missing(members).isEmpty()) {
+            List<Player> missing = missing(members);
+            if (!missing.isEmpty()) {
+                if (missing.contains(anchor)) {
+                    aborts++;
+                    return Optional.empty();
+                }
                 cool(anchor, now, true);
                 return Optional.empty();
             }
@@ -109,10 +131,20 @@ public final class MatchMaker {
         cooling.removeIf(pending -> members.contains(pending.player()));
     }
 
-    /** Under the lock. Refuses a matched anchor, who would return to the heap. */
+    /**
+     * Under the lock. A matched anchor is counted as an abort rather than
+     * cooled, since cooling would return them to the heap.
+     */
     private void cool(Player anchor, Instant now, boolean lostToContention) {
-        if (!index.contains(anchor.id())) return;
-        cooling.add(new Pending(anchor, now.plus(COOLDOWN)));
+        if (!index.contains(anchor.id())) {
+            aborts++;
+            return;
+        }
+
+        if (lostToContention) contentionCooldowns++;
+        else starvationCooldowns++;
+
+        cooling.add(new Pending(anchor, now.plus(cooldown)));
     }
 
     /**
@@ -167,5 +199,21 @@ public final class MatchMaker {
     /** Players sitting out a cooldown. Exposed for tests. */
     int coolingCount() {
         return cooling.size();
+    }
+
+    int retryCount() {
+        return retries;
+    }
+
+    int contentionCount() {
+        return contentionCooldowns;
+    }
+
+    int starvationCount() {
+        return starvationCooldowns;
+    }
+
+    int abortCount() {
+        return aborts;
     }
 }

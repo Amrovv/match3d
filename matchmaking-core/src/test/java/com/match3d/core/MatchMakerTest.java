@@ -281,6 +281,30 @@ class MatchMakerTest {
                 "Nor are they still queued by rating");
     }
 
+    // counting what a pass did
+
+    @Test void testASuccessfulLobbyCountsNothing() {
+        joinCluster(1000, 10);
+
+        matcher.formLobby(NOW);
+
+        assertEquals(0, matcher.retryCount(), "Nothing was taken, so nothing was retried");
+        assertEquals(0, matcher.starvationCount(), "A lobby formed, so no anchor was cooled");
+        assertEquals(0, matcher.contentionCount(), "No budget was spent");
+        assertEquals(0, matcher.abortCount(), "The anchor was never at risk");
+    }
+
+    @Test void testAnAnchorWhoCannotFillALobbyIsCountedAsStarvation() {
+        joinCluster(1000, 9);
+
+        matcher.formLobby(NOW);
+
+        assertEquals(1, matcher.starvationCount(), "No lobby existed for this anchor");
+        assertEquals(0, matcher.contentionCount(),
+                "Nobody took a member, so the failure is not contention");
+        assertEquals(0, matcher.retryCount(), "There was nothing to retry");
+    }
+
     // clock skew
 
     @Test void testAQueueTimeInTheFutureIsTreatedAsNoWait() {
