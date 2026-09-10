@@ -8,19 +8,16 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.PriorityQueue;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Forms lobbies, one attempt per call.
+ * Forms lobbies, one attempt per call. The heap names the anchor, their wait
+ * sets a radius, the index yields candidates inside it, and consent must be
+ * mutual across every pair.
  *
- * The heap names the anchor, the widening function turns their wait into a
- * radius, the index yields the candidates inside it, and every candidate must
- * accept the anchor as much as the anchor accepts them.
- *
- * A call either forms one lobby or puts one anchor on cooldown, so every call
- * shrinks the heap and a caller loop terminates without tracking what it tried.
- *
- * Owns the cooldown queue, so it is stateful. Never reads a clock, now is a
- * parameter, the same rule the widening function follows.
+ * Every call shrinks the heap, so a caller loop terminates without tracking
+ * what it tried. Owns the cooldown queue and the commit lock, and never reads
+ * a clock: now is a parameter.
  */
 public final class MatchMaker {
 
@@ -30,12 +27,9 @@ public final class MatchMaker {
     /** How long a failed anchor sits out before the heap sees them again. */
     static final Duration COOLDOWN = Duration.ofSeconds(10);
 
-    /**
-     * A failed anchor waiting out their cooldown.
-     *
-     * queuedAt is untouched, so a returning player is credited for the whole
-     * time they sat out and lands back at the front of the heap.
-     */
+    private final ReentrantLock commitLock = new ReentrantLock();
+
+    /** queuedAt is untouched, so a returning player keeps their full credit. */
     private record Pending(Player player, Instant readyAt) {
     }
 
@@ -45,9 +39,7 @@ public final class MatchMaker {
     private final SkillIndex index;
     private final FairnessHeap heap;
 
-    /**
-     * Failed anchors, soonest ready first.
-     */
+    /** Failed anchors, soonest ready first. */
     private final PriorityQueue<Pending> cooling = new PriorityQueue<>(BY_READY_AT);
 
     public MatchMaker(SkillIndex index, FairnessHeap heap) {
@@ -56,55 +48,82 @@ public final class MatchMaker {
     }
 
     /**
-     * Makes one attempt to form a lobby.
+     * One attempt. Selection runs outside the lock and is verified under it,
+     * so a lobby forms only if all ten are still queued at that moment.
      *
-     * Returns the lobby if one formed, or empty if the anchor could not fill
-     * one and was put on cooldown, or if nobody was available to anchor.
+     * Empty means the anchor could not fill a lobby, lost a member to another
+     * worker, or was itself matched elsewhere.
      */
     public Optional<Lobby> formLobby(Instant now) {
-        // Drain any cooled anchors back to the heap.
-        drainCooled(now);
-
-        Player anchor = heap.poll();
-        if (anchor == null) {
-            return Optional.empty();
+        Player anchor;
+        commitLock.lock();
+        try {
+            anchor = drainAndPoll(now);
+        } finally {
+            commitLock.unlock();
         }
+        if (anchor == null) return Optional.empty();
 
         List<Player> members = selectMembers(anchor, now);
 
-        if (members.size() < LOBBY_SIZE) {
-            cooling.add(new Pending(anchor, now.plus(COOLDOWN)));
-            return Optional.empty();
+        commitLock.lock();
+        try {
+            if (members.size() < LOBBY_SIZE) {
+                cool(anchor, now, false);
+                return Optional.empty();
+            }
+            if (!missing(members).isEmpty()) {
+                cool(anchor, now, true);
+                return Optional.empty();
+            }
+            commit(members);
+        } finally {
+            commitLock.unlock();
         }
-
-        for (Player member : members) {
-            heap.remove(member.id());
-            index.remove(member);
-        }
-
-        // A member may be a failed anchor still cooling, since cooling bars a
-        // player from anchoring rather than from being recruited. Left in,
-        // drainCooled would hand a matched player back to the heap.
-        cooling.removeIf(pending -> members.contains(pending.player()));
 
         return Optional.of(new Lobby(members));
     }
 
+    /** Under the lock. Drains cooled anchors, then polls one. Null if none. */
+    private Player drainAndPoll(Instant now) {
+        drainCooled(now);
+        return heap.poll();
+    }
+
+    /** Under the lock. Members no longer queued, empty if all ten survive. */
+    private List<Player> missing(List<Player> members) {
+        List<Player> missing = new ArrayList<>();
+        for (Player member : members) {
+            if (!index.contains(member.id())) missing.add(member);
+        }
+        return missing;
+    }
+
+    /** Under the lock. Removes all ten from the heap, index and cooldown queue. */
+    private void commit(List<Player> members) {
+        for (Player member : members) {
+            heap.remove(member.id());
+            index.remove(member);
+        }
+        // A member may be cooling. Left in, drainCooled would hand them back.
+        cooling.removeIf(pending -> members.contains(pending.player()));
+    }
+
+    /** Under the lock. Refuses a matched anchor, who would return to the heap. */
+    private void cool(Player anchor, Instant now, boolean lostToContention) {
+        if (!index.contains(anchor.id())) return;
+        cooling.add(new Pending(anchor, now.plus(COOLDOWN)));
+    }
+
     /**
-     * The lobby the anchor can form right now, or empty if they cannot fill one.
-     *
-     * Every member must accept every other member, not merely the anchor.
+     * The members the anchor can seat now, short if they cannot fill a lobby.
+     * Consent is mutual across every pair, not merely with the anchor.
      */
     private List<Player> selectMembers(Player anchor, Instant now) {
         int anchorRadius = radiusOf(anchor, now);
 
-        // Bounds who is worth looking at, while Overlap decides who is taken.
-        // Kept apart from the overlap values, which start here and then move.
-        //
-        // The window is exactly the anchor's own reach, so it excludes only
-        // candidates Overlap would reject anyway. It is an optimisation, not a
-        // filter, and no test can pin it: widening it to the whole domain
-        // changes cost and nothing else.
+        // The window is the anchor's own reach, so it excludes only candidates
+        // Overlap would reject anyway. An optimisation, not a filter.
         int windowLow = anchor.rating() - anchorRadius;
         int windowHigh = anchor.rating() + anchorRadius;
 
@@ -130,33 +149,22 @@ public final class MatchMaker {
     }
 
     /**
-     * The rating radius a player accepts, given how long they have waited.
-     *
-     * A queue time later than now is treated as no wait at all, rather than
-     * thrown. The two are the same player state, someone who has just joined,
-     * and once intake stamps the queue time on one machine and the engine reads
-     * it on another, modest clock skew puts a fresh player slightly in the
-     * future. The widening function still rejects a negative wait, because
-     * there it is a programming error rather than a clock disagreement.
+     * A queue time in the future counts as no wait, since intake and the
+     * engine stamp it on different clocks.
      */
     private static int radiusOf(Player player, Instant now) {
         Duration waited = Duration.between(player.queuedAt(), now);
         return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
     }
 
-    /**
-     * Returns every player whose cooldown has expired to the heap.
-     */
+    /** Returns every player whose cooldown has expired to the heap. */
     private void drainCooled(Instant now) {
         while (!cooling.isEmpty() && !cooling.peek().readyAt().isAfter(now)) {
             heap.insert(cooling.poll().player());
         }
     }
 
-    /**
-     * The number of players sitting out a cooldown. Exposed so a test can prove
-     * a failed anchor left the heap and came back.
-     */
+    /** Players sitting out a cooldown. Exposed for tests. */
     int coolingCount() {
         return cooling.size();
     }
