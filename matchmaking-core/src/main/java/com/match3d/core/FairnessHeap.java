@@ -5,7 +5,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Queued players ordered by wait time, longest waiting first. An array backed
+ * Queued entries ordered by wait time, longest waiting first. An array backed
  * binary min heap on queuedAt, with a map from id to array index so removal
  * from the middle is O(log n) rather than O(n).
  *
@@ -19,7 +19,7 @@ public final class FairnessHeap {
 
     private static final int INITIAL_CAPACITY = 16;
 
-    private Player[] heap = new Player[INITIAL_CAPACITY];
+    private QueueEntry[] heap = new QueueEntry[INITIAL_CAPACITY];
     private final Map<UUID, Integer> positions = new HashMap<>();
     private int size = 0;
 
@@ -36,28 +36,28 @@ public final class FairnessHeap {
         return 2 * index + 2;
     }
 
-    /** Adds a player. False if that id is already queued. */
-    public boolean insert(Player player) {
-        if (positions.containsKey(player.id())) return false;
+    /** Adds an entry. False if that id is already queued. */
+    public boolean insert(QueueEntry entry) {
+        if (positions.containsKey(entry.id())) return false;
         if (size == heap.length) grow();
-        heap[size] = player;
-        positions.put(player.id(), size);
+        heap[size] = entry;
+        positions.put(entry.id(), size);
         siftUp(size);
         size++;
         return true;
     }
 
-    /** The longest waiting player, or null if empty. */
-    public Player peek() {
+    /** The longest waiting entry, or null if empty. */
+    public QueueEntry peek() {
         return heap[0];
     }
 
-    /** Removes and returns the longest waiting player, or null if empty. */
-    public Player poll() {
-        Player player = heap[0];
-        if (player == null) return null;
-        if (!remove(player.id())) return null;
-        return player;
+    /** Removes and returns the longest waiting entry, or null if empty. */
+    public QueueEntry poll() {
+        QueueEntry entry = heap[0];
+        if (entry == null) return null;
+        if (!remove(entry.id())) return null;
+        return entry;
     }
 
     /** Removes by id, wherever they sit. False if that id is not queued. */
@@ -66,7 +66,7 @@ public final class FairnessHeap {
         if (index == null) return false;
 
         size--;
-        Player moved = heap[size];
+        QueueEntry moved = heap[size];
         heap[size] = null;
 
         if (index < size) {
@@ -88,7 +88,7 @@ public final class FairnessHeap {
 
     /** Up until the parent waits at least as long. */
     private void siftUp(int index) {
-        while (index != 0 && (Player.BY_WAIT_TIME.compare(heap[index], heap[parent(index)]) < 0)){
+        while (index != 0 && (QueueEntry.BY_WAIT_TIME.compare(heap[index], heap[parent(index)]) < 0)){
             swap(index, parent(index));
             index = parent(index);
         }
@@ -100,10 +100,10 @@ public final class FairnessHeap {
         int r = right(index);
 
         int smallest = index;
-        if (l < size && Player.BY_WAIT_TIME.compare(heap[l], heap[smallest]) < 0) {
+        if (l < size && QueueEntry.BY_WAIT_TIME.compare(heap[l], heap[smallest]) < 0) {
             smallest = l;
         }
-        if (r < size && Player.BY_WAIT_TIME.compare(heap[r], heap[smallest]) < 0) {
+        if (r < size && QueueEntry.BY_WAIT_TIME.compare(heap[r], heap[smallest]) < 0) {
             smallest = r;
         }
 
@@ -118,20 +118,20 @@ public final class FairnessHeap {
      * drift apart and remove starts corrupting the heap silently.
      */
     private void swap(int a, int b) {
-        Player playerA = heap[a];
-        Player playerB = heap[b];
+        QueueEntry entryA = heap[a];
+        QueueEntry entryB = heap[b];
 
-        heap[a] = playerB;
-        heap[b] = playerA;
+        heap[a] = entryB;
+        heap[b] = entryA;
 
-        positions.put(playerA.id(), b);
-        positions.put(playerB.id(), a);
+        positions.put(entryA.id(), b);
+        positions.put(entryB.id(), a);
 
     }
 
     /** Doubles the backing array when it is full. */
     private void grow() {
-        Player[] newHeap = new Player[heap.length * 2];
+        QueueEntry[] newHeap = new QueueEntry[heap.length * 2];
         System.arraycopy(heap, 0, newHeap, 0, heap.length);
         heap = newHeap;
     }

@@ -33,8 +33,8 @@ class MatchingRaceTest {
         }
 
         /** Every player still in the index, however many buckets they are spread across. */
-        List<Player> queued() {
-            return index.playersInRange(1, 5000).flatMap(Set::stream).toList();
+        List<QueueEntry> queued() {
+            return index.entriesInRange(1, 5000).flatMap(Set::stream).toList();
         }
     }
 
@@ -128,7 +128,7 @@ class MatchingRaceTest {
         for (int r = 0; r < ROUNDS; r++) {
             Round round = round();
 
-            assertEquals(round.index().playerCount(),
+            assertEquals(round.index().entryCount(),
                     round.heap().size() + round.matcher().coolingCount(),
                     "A queued player is in the heap unless they are cooling");
         }
@@ -138,7 +138,7 @@ class MatchingRaceTest {
         for (int r = 0; r < ROUNDS; r++) {
             Round round = round();
 
-            assertEquals(round.queued().size(), round.index().playerCount(),
+            assertEquals(round.queued().size(), round.index().entryCount(),
                     "The index's count is the number of players actually in its buckets");
         }
     }
@@ -154,7 +154,7 @@ class MatchingRaceTest {
         for (int r = 0; r < ROUNDS; r++) {
             Round round = round();
 
-            round.index().playersInRange(1, 5000).forEach(bucket ->
+            round.index().entriesInRange(1, 5000).forEach(bucket ->
                     assertFalse(bucket.isEmpty(), "A bucket exists only while it holds a player"));
         }
     }

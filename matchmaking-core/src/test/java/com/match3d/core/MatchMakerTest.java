@@ -109,7 +109,7 @@ class MatchMakerTest {
         joinCluster(1000, 15);
 
         assertTrue(matcher.formLobby(NOW).isPresent(), "Fifteen candidates are more than enough");
-        assertEquals(5, index.playerCount(), "One attempt seats ten, it does not drain the queue");
+        assertEquals(5, index.entryCount(), "One attempt seats ten, it does not drain the queue");
         assertEquals(5, heap.size(), "The heap keeps the five who were not seated");
     }
 
@@ -172,7 +172,7 @@ class MatchMakerTest {
 
         matcher.formLobby(NOW);
 
-        assertEquals(0, index.playerCount(), "A matched player is no longer queued by rating");
+        assertEquals(0, index.entryCount(), "A matched player is no longer queued by rating");
         assertEquals(0, index.ratingCount(), "The emptied bucket goes with them");
         assertEquals(0, heap.size(), "A matched player is no longer waiting");
     }
@@ -199,7 +199,7 @@ class MatchMakerTest {
 
         matcher.formLobby(NOW);
 
-        assertEquals(9, index.playerCount(), "Nobody was matched, so nobody leaves the index");
+        assertEquals(9, index.entryCount(), "Nobody was matched, so nobody leaves the index");
         assertEquals(8, heap.size(), "Only the anchor left the heap, and they are on cooldown");
         assertEquals(1, matcher.coolingCount(), "The failed anchor is sitting out");
     }
@@ -237,7 +237,7 @@ class MatchMakerTest {
 
         MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
         selection.fill();
-        List<Player> dropped = List.copyOf(selection.members().subList(8, 10));
+        List<QueueEntry> dropped = List.copyOf(selection.members().subList(8, 10));
         selection.drop(dropped);
         selection.fill();
 
@@ -338,7 +338,7 @@ class MatchMakerTest {
 
         assertFalse(heap.contains(failedAnchor.id()),
                 "The cooldown has expired, but the player is in a lobby and must not be drained back");
-        assertFalse(index.playersInRange(0, 5000).anyMatch(b -> b.contains(failedAnchor)),
+        assertFalse(index.entriesInRange(0, 5000).anyMatch(b -> b.contains(failedAnchor)),
                 "Nor are they still queued by rating");
     }
 

@@ -35,15 +35,15 @@ class SkillIndexTest {
     }
 
     /** The window flattened back to players, for the cases that only care about members. */
-    private List<Player> range(int low, int high) {
-        return index.playersInRange(low, high).flatMap(Set::stream).toList();
+    private List<QueueEntry> range(int low, int high) {
+        return index.entriesInRange(low, high).flatMap(Set::stream).toList();
     }
 
     // insert
 
     @Test void testInsertPos() {
         assertTrue(index.insert(player(1000)), "A player not yet queued should be inserted");
-        assertEquals(1, index.playerCount(), "One player was inserted");
+        assertEquals(1, index.entryCount(), "One player was inserted");
         assertEquals(1, index.ratingCount(), "One rating is now occupied");
     }
 
@@ -52,7 +52,7 @@ class SkillIndexTest {
         index.insert(p);
 
         assertFalse(index.insert(p), "The same player cannot be queued twice at one rating");
-        assertEquals(1, index.playerCount(), "A rejected insert must not change the count");
+        assertEquals(1, index.entryCount(), "A rejected insert must not change the count");
         assertEquals(1, index.ratingCount(), "A rejected insert must not add a rating");
     }
 
@@ -60,7 +60,7 @@ class SkillIndexTest {
         index.insert(player(1000));
         index.insert(player(1000));
 
-        assertEquals(2, index.playerCount(), "Both players are queued");
+        assertEquals(2, index.entryCount(), "Both players are queued");
         assertEquals(1, index.ratingCount(), "Both share one bucket, so one rating is occupied");
     }
 
@@ -68,7 +68,7 @@ class SkillIndexTest {
         index.insert(player(1000));
         index.insert(player(2000));
 
-        assertEquals(2, index.playerCount(), "Both players are queued");
+        assertEquals(2, index.entryCount(), "Both players are queued");
         assertEquals(2, index.ratingCount(), "Two ratings are occupied");
     }
 
@@ -79,14 +79,14 @@ class SkillIndexTest {
         index.insert(p);
 
         assertTrue(index.remove(p), "A queued player should be removed");
-        assertEquals(0, index.playerCount(), "The queue is empty again");
+        assertEquals(0, index.entryCount(), "The queue is empty again");
     }
 
     @Test void testRemoveNeg() {
         index.insert(player(1000));
 
         assertFalse(index.remove(player(1000)), "A player who never queued cannot be removed");
-        assertEquals(1, index.playerCount(), "A failed remove must not change the count");
+        assertEquals(1, index.entryCount(), "A failed remove must not change the count");
     }
 
     @Test void testInsertNegSameIdDifferentRating() {
@@ -95,7 +95,7 @@ class SkillIndexTest {
 
         assertFalse(index.insert(player(id, 2000)),
                 "An id is queued at most once, whatever rating the second join carries");
-        assertEquals(1, index.playerCount(), "A rejected insert must not change the count");
+        assertEquals(1, index.entryCount(), "A rejected insert must not change the count");
         assertEquals(1, index.ratingCount(), "A rejected insert must not occupy a second rating");
     }
 
@@ -121,14 +121,14 @@ class SkillIndexTest {
         index.insert(p);
 
         assertTrue(index.remove(p.id()), "A queued id should be removable without the player");
-        assertEquals(0, index.playerCount(), "The player is no longer queued");
+        assertEquals(0, index.entryCount(), "The player is no longer queued");
     }
 
     @Test void testRemoveByIdNeg() {
         index.insert(player(1000));
 
         assertFalse(index.remove(UUID.randomUUID()), "An id that never queued cannot be removed");
-        assertEquals(1, index.playerCount(), "A failed remove must not change the count");
+        assertEquals(1, index.entryCount(), "A failed remove must not change the count");
     }
 
     @Test void testRemoveIgnoresAStaleRating() {
@@ -137,7 +137,7 @@ class SkillIndexTest {
 
         assertTrue(index.remove(player(id, 2000)),
                 "The id is the address, so a stale rating still finds the entry");
-        assertEquals(0, index.playerCount(), "The player is no longer queued at any rating");
+        assertEquals(0, index.entryCount(), "The player is no longer queued at any rating");
         assertEquals(0, index.ratingCount(), "Their bucket was deleted once it emptied");
     }
 
@@ -157,7 +157,7 @@ class SkillIndexTest {
         index.remove(goes);
 
         assertEquals(1, index.ratingCount(), "The bucket still holds a player, so it survives");
-        assertEquals(1, index.playerCount(), "One of the two players remains");
+        assertEquals(1, index.entryCount(), "One of the two players remains");
     }
 
     @Test void testRemoveTwiceNeg() {
@@ -166,10 +166,10 @@ class SkillIndexTest {
         index.remove(p);
 
         assertFalse(index.remove(p), "A player already removed cannot be removed again");
-        assertEquals(0, index.playerCount(), "The count must not be decremented twice");
+        assertEquals(0, index.entryCount(), "The count must not be decremented twice");
     }
 
-    // playersInRange
+    // entriesInRange
 
     @Test void testRangeEmptyIndex() {
         assertEquals(List.of(), range(0, 5000), "An empty index has nobody in any window");
@@ -258,7 +258,7 @@ class SkillIndexTest {
         }
 
         AtomicInteger pulled = new AtomicInteger();
-        List<Player> taken = index.playersInRange(1000, 1049)
+        List<QueueEntry> taken = index.entriesInRange(1000, 1049)
                                   .flatMap(Set::stream)
                                   .peek(p -> pulled.incrementAndGet())
                                   .limit(2)
@@ -269,7 +269,7 @@ class SkillIndexTest {
     }
 
     @Test void testRangeInvertedWindow() {
-        assertThrows(IllegalArgumentException.class, () -> index.playersInRange(1500, 1000),
+        assertThrows(IllegalArgumentException.class, () -> index.entriesInRange(1500, 1000),
                 "An inverted window is a caller bug, not an empty result");
     }
 
@@ -278,7 +278,7 @@ class SkillIndexTest {
         index.insert(player(1000));
         index.insert(player(1002));
 
-        List<Set<Player>> buckets = index.playersInRange(1000, 1002).toList();
+        List<Set<QueueEntry>> buckets = index.entriesInRange(1000, 1002).toList();
 
         assertEquals(2, buckets.size(), "Two ratings are occupied, so two buckets come back");
         assertEquals(2, buckets.get(0).size(), "The first bucket holds both players at 1000");
@@ -291,13 +291,13 @@ class SkillIndexTest {
         index.insert(player(1002));
         index.remove(only);
 
-        assertTrue(index.playersInRange(0, 5000).noneMatch(Set::isEmpty),
+        assertTrue(index.entriesInRange(0, 5000).noneMatch(Set::isEmpty),
                 "A bucket exists only while it holds a player, so none can come back empty");
     }
 
     @Test void testRangeBucketsAreUnmodifiableNeg() {
         index.insert(player(1000));
-        Set<Player> bucket = index.playersInRange(1000, 1000).findFirst().orElseThrow();
+        Set<QueueEntry> bucket = index.entriesInRange(1000, 1000).findFirst().orElseThrow();
 
         assertThrows(UnsupportedOperationException.class, () -> bucket.add(player(1000)),
                 "A bucket handed out is a view, not a way into the index");
@@ -309,7 +309,7 @@ class SkillIndexTest {
         }
 
         AtomicInteger pulled = new AtomicInteger();
-        List<Player> taken = index.playersInRange(1000, 1000)
+        List<QueueEntry> taken = index.entriesInRange(1000, 1000)
                                   .flatMap(Set::stream)
                                   .peek(p -> pulled.incrementAndGet())
                                   .limit(2)
@@ -326,9 +326,9 @@ class SkillIndexTest {
         }
 
         assertDoesNotThrow(
-                () -> index.playersInRange(1000, 1009).flatMap(Set::stream).forEach(index::remove),
+                () -> index.entriesInRange(1000, 1009).flatMap(Set::stream).forEach(index::remove),
                 "The window is weakly consistent, so mutating mid draw does not throw");
-        assertEquals(0, index.playerCount(), "The draw still reached every player");
+        assertEquals(0, index.entryCount(), "The draw still reached every player");
     }
 
     // counters
@@ -347,9 +347,9 @@ class SkillIndexTest {
         index.remove(neverQueued);
         index.remove(b);
 
-        assertEquals(2, index.playerCount(), "Only a and c remain");
+        assertEquals(2, index.entryCount(), "Only a and c remain");
         assertEquals(2, index.ratingCount(), "Ratings 1000 and 2000 are occupied");
-        assertEquals(index.playersInRange(Integer.MIN_VALUE, Integer.MAX_VALUE).flatMap(Set::stream).count(),
-                index.playerCount(), "The counter must not drift from what the buckets actually hold");
+        assertEquals(index.entriesInRange(Integer.MIN_VALUE, Integer.MAX_VALUE).flatMap(Set::stream).count(),
+                index.entryCount(), "The counter must not drift from what the buckets actually hold");
     }
 }

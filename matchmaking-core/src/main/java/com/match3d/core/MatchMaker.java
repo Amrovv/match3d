@@ -35,11 +35,11 @@ public final class MatchMaker {
     private final ReentrantLock commitLock = new ReentrantLock();
 
     /** queuedAt is untouched, so a returning player keeps their full credit. */
-    private record Pending(Player player, Instant readyAt) {
+    private record Pending(QueueEntry entry, Instant readyAt) {
     }
 
     private static final Comparator<Pending> BY_READY_AT =
-            Comparator.comparing(Pending::readyAt).thenComparing(p -> p.player().id());
+            Comparator.comparing(Pending::readyAt).thenComparing(p -> p.entry().id());
 
     private final SkillIndex index;
     private final FairnessHeap heap;
@@ -79,7 +79,7 @@ public final class MatchMaker {
      * members, or was itself matched elsewhere.
      */
     public Optional<Lobby> formLobby(Instant now) {
-        Player anchor;
+        QueueEntry anchor;
         commitLock.lock();
         try {
             anchor = drainAndPoll(now);
@@ -90,7 +90,7 @@ public final class MatchMaker {
 
         Selection selection = new Selection(anchor, now);
         selection.fill();
-        List<Player> members = selection.members();
+        List<QueueEntry> members = selection.members();
 
         boolean settled = false;
         int budget = -1;
@@ -98,17 +98,17 @@ public final class MatchMaker {
             while (true) {
                 commitLock.lock();
                 try {
-                    if (members.size() < LOBBY_SIZE) {
+                    if (seats(members) < LOBBY_SIZE) {
                         cool(anchor, now, false);
                         settled = true;
                         return Optional.empty();
                     }
-                    List<Player> missing = missing(members);
+                    List<QueueEntry> missing = missing(members);
 
                     if (missing.isEmpty()) {
                         commit(members);
                         settled = true;
-                        return Optional.of(new Lobby(members));
+                        return Optional.of(new Lobby(playersIn(members)));
                     }
 
                     if (missing.contains(anchor)) {
@@ -148,9 +148,9 @@ public final class MatchMaker {
     }
 
     /** Under the lock. Drains cooled anchors, then polls one. Null if none. */
-    private Player drainAndPoll(Instant now) {
+    private QueueEntry drainAndPoll(Instant now) {
         drainCooled(now);
-        Player anchor = heap.poll();
+        QueueEntry anchor = heap.poll();
         if (anchor != null) {
             index.remove(anchor);
         }
@@ -158,30 +158,30 @@ public final class MatchMaker {
     }
 
     /** Under the lock. Members no longer queued, empty if all ten survive. */
-    private List<Player> missing(List<Player> members) {
-        List<Player> missing = new ArrayList<>();
+    private List<QueueEntry> missing(List<QueueEntry> members) {
+        List<QueueEntry> missing = new ArrayList<>();
         for (int i = 1; i < members.size(); i++) {
-            Player member = members.get(i);
+            QueueEntry member = members.get(i);
             if (!index.contains(member.id())) missing.add(member);
         }
         return missing;
     }
 
     /** Under the lock. Removes all ten from the heap, index and cooldown queue. */
-    private void commit(List<Player> members) {
-        for (Player member : members) {
+    private void commit(List<QueueEntry> members) {
+        for (QueueEntry member : members) {
             heap.remove(member.id());
             index.remove(member);
         }
         // A member may be cooling. Left in, drainCooled would hand them back.
-        cooling.removeIf(pending -> members.contains(pending.player()));
+        cooling.removeIf(pending -> members.contains(pending.entry()));
     }
 
     /**
      * Under the lock. A matched anchor is counted as an abort rather than
      * cooled, since cooling would return them to the heap.
      */
-    private void cool(Player anchor, Instant now, boolean lostToContention) {
+    private void cool(QueueEntry anchor, Instant now, boolean lostToContention) {
         index.insert(anchor);
         if (lostToContention) contentionCooldowns++;
         else starvationCooldowns++;
@@ -209,14 +209,14 @@ public final class MatchMaker {
      */
     final class Selection {
 
-        private final Player anchor;
+        private final QueueEntry anchor;
         private final Instant now;
-        private final Iterator<Player> cursor;
-        private final List<Player> members = new ArrayList<>(LOBBY_SIZE);
+        private final Iterator<QueueEntry> cursor;
+        private final List<QueueEntry> members = new ArrayList<>(LOBBY_SIZE);
 
         private Overlap overlap;
 
-        Selection(Player anchor, Instant now) {
+        Selection(QueueEntry anchor, Instant now) {
             this.anchor = anchor;
             this.now = now;
 
@@ -229,7 +229,7 @@ public final class MatchMaker {
             int windowHigh = anchor.rating() + anchorRadius;
 
             this.cursor = WaitTimeMerge.byWaitTime(
-                    index.playersInRange(windowLow, windowHigh)).iterator();
+                    index.entriesInRange(windowLow, windowHigh)).iterator();
 
             members.add(anchor);
             this.overlap = Overlap.of(anchor, anchorRadius);
@@ -237,9 +237,13 @@ public final class MatchMaker {
 
         /** Seats candidates until the lobby is full or the window is spent. */
         void fill() {
-            while (members.size() < LOBBY_SIZE && cursor.hasNext()) {
-                Player candidate = cursor.next();
+            while (seats(members) < LOBBY_SIZE && cursor.hasNext()) {
+                QueueEntry candidate = cursor.next();
                 if (members.contains(candidate)) continue;
+
+                // A party is seated whole or not at all, so one that overruns
+                // the seats left is passed over rather than split.
+                if (seats(members) + candidate.size() > LOBBY_SIZE) continue;
 
                 Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
                 if (extended.valid()) {
@@ -255,13 +259,13 @@ public final class MatchMaker {
          * Overlap is a lossy fold, so it cannot be un-extended. Refolding is
          * nine constant time steps, against a re-seed of the whole window.
          */
-        void drop(List<Player> gone) {
+        void drop(List<QueueEntry> gone) {
             members.removeAll(gone);
             overlap = overlapOf(members, now);
         }
 
         /** The seated members, the anchor first. Short until fill succeeds. */
-        List<Player> members() {
+        List<QueueEntry> members() {
             return members;
         }
     }
@@ -270,18 +274,18 @@ public final class MatchMaker {
      * A queue time in the future counts as no wait, since intake and the
      * engine stamp it on different clocks.
      */
-    private static int radiusOf(Player player, Instant now) {
-        Duration waited = Duration.between(player.queuedAt(), now);
+    private static int radiusOf(QueueEntry entry, Instant now) {
+        Duration waited = Duration.between(entry.queuedAt(), now);
         return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
     }
 
     /** The consent state of a seated group, folded from scratch. */
-    private Overlap overlapOf(List<Player> seated, Instant now) {
-        Player first = seated.get(0);
+    private Overlap overlapOf(List<QueueEntry> seated, Instant now) {
+        QueueEntry first = seated.get(0);
         Overlap overlap = Overlap.of(first, radiusOf(first, now));
 
-        for (Player player : seated.subList(1, seated.size())) {
-            overlap = overlap.extendedBy(player, radiusOf(player, now));
+        for (QueueEntry entry : seated.subList(1, seated.size())) {
+            overlap = overlap.extendedBy(entry, radiusOf(entry, now));
         }
         return overlap;
     }
@@ -289,11 +293,29 @@ public final class MatchMaker {
     /** Returns every player whose cooldown has expired to the heap. */
     private void drainCooled(Instant now) {
         while (!cooling.isEmpty() && !cooling.peek().readyAt().isAfter(now)) {
-            heap.insert(cooling.poll().player());
+            heap.insert(cooling.poll().entry());
         }
     }
 
-    /** Players sitting out a cooldown. Exposed for tests. */
+    /** Seats these entries take, since a party takes more than one. */
+    private static int seats(List<QueueEntry> entries) {
+        int seats = 0;
+        for (QueueEntry entry : entries) {
+            seats += entry.size();
+        }
+        return seats;
+    }
+
+    /** The ten players inside the seated entries, the anchor's first. */
+    private static List<Player> playersIn(List<QueueEntry> entries) {
+        List<Player> players = new ArrayList<>(LOBBY_SIZE);
+        for (QueueEntry entry : entries) {
+            players.addAll(entry.members());
+        }
+        return players;
+    }
+
+    /** Entries sitting out a cooldown. Exposed for tests. */
     int coolingCount() {
         return cooling.size();
     }

@@ -12,14 +12,14 @@ package com.match3d.core;
  */
 record Overlap(int minR, int maxR, int floor, int ceiling) {
 
-    /** A set holding one player, who accepts themselves. */
-    static Overlap of(Player player, int radius) {
-        return new Overlap(player.rating(), player.rating(),
-                player.rating() - radius, player.rating() + radius);
+    /** A set holding one entry, which accepts itself. */
+    static Overlap of(QueueEntry entry, int radius) {
+        return new Overlap(entry.rating(), entry.rating(),
+                entry.rating() - radius, entry.rating() + radius);
     }
 
     /** The set with this candidate in it. Says nothing about whether they may join. */
-    Overlap extendedBy(Player candidate, int radius) {
+    Overlap extendedBy(QueueEntry candidate, int radius) {
         return new Overlap(
                 Math.min(minR, candidate.rating()),
                 Math.max(maxR, candidate.rating()),

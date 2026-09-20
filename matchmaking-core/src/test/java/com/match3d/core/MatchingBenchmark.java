@@ -145,7 +145,7 @@ class MatchingBenchmark {
         List<Player> seated = run.lobbies().stream()
                                  .flatMap(lobby -> lobby.members().stream()).toList();
         int distinct = (int) seated.stream().distinct().count();
-        int queued = (int) index.playersInRange(1, 5000).flatMap(Set::stream).count();
+        int queued = (int) index.entriesInRange(1, 5000).flatMap(Set::stream).count();
 
         return new Result(run.lobbies().size(), seated.size() - distinct, queued,
                 matcher.retryCount(), matcher.contentionCount(),

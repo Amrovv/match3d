@@ -25,13 +25,13 @@ class WaitTimeMergeTest {
     }
 
     /** A bucket in the order given, which is the order the index would hold it in. */
-    private static Set<Player> bucket(Player... players) {
+    private static Set<QueueEntry> bucket(Player... players) {
         return new LinkedHashSet<>(List.of(players));
     }
 
     /** The merged order, drawn to exhaustion. */
     @SafeVarargs
-    private static List<Player> merge(Set<Player>... buckets) {
+    private static List<QueueEntry> merge(Set<QueueEntry>... buckets) {
         return WaitTimeMerge.byWaitTime(Stream.of(buckets)).toList();
     }
 
@@ -39,17 +39,17 @@ class WaitTimeMergeTest {
      * A bucket that counts how many players are actually pulled out of it, so a
      * test can prove the merge does not walk buckets it was not asked to.
      */
-    private static Set<Player> countingBucket(AtomicInteger pulled, List<Player> players) {
+    private static Set<QueueEntry> countingBucket(AtomicInteger pulled, List<Player> players) {
         return new LinkedHashSet<>(players) {
             @Override
-            public Iterator<Player> iterator() {
-                Iterator<Player> inner = super.iterator();
+            public Iterator<QueueEntry> iterator() {
+                Iterator<QueueEntry> inner = super.iterator();
                 return new Iterator<>() {
                     @Override public boolean hasNext() {
                         return inner.hasNext();
                     }
 
-                    @Override public Player next() {
+                    @Override public QueueEntry next() {
                         pulled.incrementAndGet();
                         return inner.next();
                     }
@@ -110,7 +110,7 @@ class WaitTimeMergeTest {
             everyone.add(queuedAt(i));
         }
 
-        List<Player> merged = merge(
+        List<QueueEntry> merged = merge(
                 bucket(everyone.get(0), everyone.get(3), everyone.get(9), everyone.get(20)),
                 bucket(everyone.get(1), everyone.get(4), everyone.get(15)),
                 bucket(everyone.get(2), everyone.get(7), everyone.get(11), everyone.get(29)));
@@ -136,7 +136,7 @@ class WaitTimeMergeTest {
     @Test void testAgreesWithTheFairnessHeap() {
         // The heap picks the anchor and the merge fills the seats, so the two
         // must never disagree about who has waited longest. Both read
-        // Player.BY_WAIT_TIME, and this is what proves it.
+        // QueueEntry.BY_WAIT_TIME, and this is what proves it.
         FairnessHeap heap = new FairnessHeap();
         List<Player> odd = new ArrayList<>();
         List<Player> even = new ArrayList<>();
@@ -146,8 +146,8 @@ class WaitTimeMergeTest {
             (i % 2 == 0 ? even : odd).add(p);
         }
 
-        List<Player> drained = new ArrayList<>();
-        Player next;
+        List<QueueEntry> drained = new ArrayList<>();
+        QueueEntry next;
         while ((next = heap.poll()) != null) {
             drained.add(next);
         }
@@ -165,7 +165,7 @@ class WaitTimeMergeTest {
         }
         AtomicInteger pulled = new AtomicInteger();
 
-        List<Player> taken = WaitTimeMerge.byWaitTime(Stream.of(countingBucket(pulled, many)))
+        List<QueueEntry> taken = WaitTimeMerge.byWaitTime(Stream.of(countingBucket(pulled, many)))
                                           .limit(2)
                                           .toList();
 
@@ -192,7 +192,7 @@ class WaitTimeMergeTest {
     // iterator contract
 
     @Test void testExhaustedIteratorThrowsNeg() {
-        Iterator<Player> merged = WaitTimeMerge.byWaitTime(Stream.of(bucket(queuedAt(0)))).iterator();
+        Iterator<QueueEntry> merged = WaitTimeMerge.byWaitTime(Stream.of(bucket(queuedAt(0)))).iterator();
         merged.next();
 
         assertFalse(merged.hasNext(), "The only player has been drawn, so nothing remains");

@@ -31,9 +31,9 @@ class FairnessHeapTest {
     }
 
     /** Drains the heap, returning players in the order it hands them out. */
-    private List<Player> drain() {
-        List<Player> drained = new ArrayList<>();
-        Player next;
+    private List<QueueEntry> drain() {
+        List<QueueEntry> drained = new ArrayList<>();
+        QueueEntry next;
         while ((next = heap.poll()) != null) {
             drained.add(next);
         }
@@ -42,9 +42,9 @@ class FairnessHeapTest {
 
     /** Fails unless the drained order is by queuedAt ascending, then by id. */
     private void assertDrainsInWaitTimeOrder() {
-        List<Player> drained = drain();
-        List<Player> expected = new ArrayList<>(drained);
-        expected.sort(java.util.Comparator.comparing(Player::queuedAt).thenComparing(Player::id));
+        List<QueueEntry> drained = drain();
+        List<QueueEntry> expected = new ArrayList<>(drained);
+        expected.sort(QueueEntry.BY_WAIT_TIME);
 
         assertEquals(expected, drained, "The heap must hand out the longest waiting player first");
     }

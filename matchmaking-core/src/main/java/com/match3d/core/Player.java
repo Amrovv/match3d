@@ -4,7 +4,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.Comparator;
 
 /**
  * A player waiting in the queue. Immutable, so several workers may hold the
@@ -17,9 +16,6 @@ public record Player(UUID id, int rating, Instant queuedAt) implements QueueEntr
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(queuedAt, "queuedAt");
     }
-
-    static final Comparator<Player> BY_WAIT_TIME =
-            Comparator.comparing(Player::queuedAt).thenComparing(Player::id);
 
     /** A player takes one spot. */
     @Override
