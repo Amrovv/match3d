@@ -27,7 +27,7 @@ public record Player(UUID id, int rating, Instant queuedAt) implements QueueEntr
         return 1;
     }
 
-    /** A single solo member */
+    /** Just themselves, so a caller need not know which kind of entry it holds. */
     @Override
     public List<Player> members() {
         return List.of(this);
