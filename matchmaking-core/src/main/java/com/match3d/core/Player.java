@@ -1,6 +1,7 @@
 package com.match3d.core;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.Comparator;
@@ -10,7 +11,7 @@ import java.util.Comparator;
  * same object. Identity is the id alone, so a player rebuilt elsewhere with a
  * different timestamp is still the same player.
  */
-public record Player(UUID id, int rating, Instant queuedAt) {
+public record Player(UUID id, int rating, Instant queuedAt) implements QueueEntry {
 
     public Player {
         Objects.requireNonNull(id, "id");
@@ -19,6 +20,18 @@ public record Player(UUID id, int rating, Instant queuedAt) {
 
     static final Comparator<Player> BY_WAIT_TIME =
             Comparator.comparing(Player::queuedAt).thenComparing(Player::id);
+
+    /** A player takes one spot. */
+    @Override
+    public int size() {
+        return 1;
+    }
+
+    /** A single solo member */
+    @Override
+    public List<Player> members() {
+        return List.of(this);
+    }
 
     @Override
     public boolean equals(Object o) {
