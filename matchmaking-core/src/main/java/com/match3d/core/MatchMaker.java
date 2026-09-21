@@ -21,8 +21,11 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class MatchMaker {
 
-    /** Players per lobby, five a side. */
+    /** Players per lobby. */
     static final int LOBBY_SIZE = 10;
+
+    /** Players per side. A party larger than this could not be kept together. */
+    static final int TEAM_SIZE = 5;
 
     /**
      * How long a failed anchor sits out before the heap sees them again.
@@ -90,7 +93,6 @@ public final class MatchMaker {
 
         Selection selection = new Selection(anchor, now);
         selection.fill();
-        List<QueueEntry> members = selection.members();
 
         boolean settled = false;
         int budget = -1;
@@ -98,6 +100,10 @@ public final class MatchMaker {
             while (true) {
                 commitLock.lock();
                 try {
+                    // Re-read rather than hold a reference: the two sides are
+                    // the selection's state and this is a snapshot of them.
+                    List<QueueEntry> members = selection.members();
+
                     if (seats(members) < LOBBY_SIZE) {
                         cool(anchor, now, false);
                         settled = true;
@@ -108,7 +114,8 @@ public final class MatchMaker {
                     if (missing.isEmpty()) {
                         commit(members);
                         settled = true;
-                        return Optional.of(new Lobby(playersIn(members)));
+                        return Optional.of(new Lobby(playersIn(selection.teamA()),
+                                                     playersIn(selection.teamB())));
                     }
 
                     if (missing.contains(anchor)) {
@@ -117,7 +124,7 @@ public final class MatchMaker {
                     }
 
                     if (budget < 0) {
-                        budget = members.size() - missing.size();
+                        budget = seats(members) - seats(missing);
                     }
                     if (budget == 0) {
                         cool(anchor, now, true);
@@ -212,7 +219,8 @@ public final class MatchMaker {
         private final QueueEntry anchor;
         private final Instant now;
         private final Iterator<QueueEntry> cursor;
-        private final List<QueueEntry> members = new ArrayList<>(LOBBY_SIZE);
+        private final List<QueueEntry> teamA = new ArrayList<>(TEAM_SIZE);
+        private final List<QueueEntry> teamB = new ArrayList<>(TEAM_SIZE);
 
         private Overlap overlap;
 
@@ -231,26 +239,38 @@ public final class MatchMaker {
             this.cursor = WaitTimeMerge.byWaitTime(
                     index.entriesInRange(windowLow, windowHigh)).iterator();
 
-            members.add(anchor);
+            teamA.add(anchor);
             this.overlap = Overlap.of(anchor, anchorRadius);
         }
 
-        /** Seats candidates until the lobby is full or the window is spent. */
+        /** Seats candidates until both sides are full or the window is spent. */
         void fill() {
-            while (seats(members) < LOBBY_SIZE && cursor.hasNext()) {
+            while (seats(teamA) + seats(teamB) < LOBBY_SIZE && cursor.hasNext()) {
                 QueueEntry candidate = cursor.next();
-                if (members.contains(candidate)) continue;
+                if (teamA.contains(candidate) || teamB.contains(candidate)) continue;
 
-                // A party is seated whole or not at all, so one that overruns
-                // the seats left is passed over rather than split.
-                if (seats(members) + candidate.size() > LOBBY_SIZE) continue;
+                List<QueueEntry> side = sideWithRoomFor(candidate);
+                if (side == null) continue;
 
                 Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
                 if (extended.valid()) {
                     overlap = extended;
-                    members.add(candidate);
+                    side.add(candidate);
                 }
             }
+        }
+
+        /**
+         * The first side that can take this entry whole, or null if neither
+         * can. A party is never split across the two, so counting to ten
+         * rather than to five and five would form lobbies that cannot be
+         * played: three parties of three and a solo fill every seat and no
+         * subset of them adds up to a side.
+         */
+        private List<QueueEntry> sideWithRoomFor(QueueEntry candidate) {
+            if (seats(teamA) + candidate.size() <= TEAM_SIZE) return teamA;
+            if (seats(teamB) + candidate.size() <= TEAM_SIZE) return teamB;
+            return null;
         }
 
         /**
@@ -260,13 +280,29 @@ public final class MatchMaker {
          * nine constant time steps, against a re-seed of the whole window.
          */
         void drop(List<QueueEntry> gone) {
-            members.removeAll(gone);
-            overlap = overlapOf(members, now);
+            teamA.removeAll(gone);
+            teamB.removeAll(gone);
+            overlap = overlapOf(members(), now);
         }
 
-        /** The seated members, the anchor first. Short until fill succeeds. */
+        /**
+         * Both sides, team A first, so the anchor is first overall. A fresh
+         * list each call, since the two sides are the state and this is a
+         * reading of them.
+         */
         List<QueueEntry> members() {
-            return members;
+            List<QueueEntry> both = new ArrayList<>(teamA.size() + teamB.size());
+            both.addAll(teamA);
+            both.addAll(teamB);
+            return both;
+        }
+
+        List<QueueEntry> teamA() {
+            return teamA;
+        }
+
+        List<QueueEntry> teamB() {
+            return teamB;
         }
     }
 

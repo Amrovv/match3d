@@ -51,6 +51,21 @@ class MatchMakerTest {
     }
 
     /**
+     * A party of the given size at one rating, queued waitedFor seconds before
+     * NOW, joined to both structures as the single entry it is.
+     */
+    private Party joinParty(int rating, int size, int waitedFor) {
+        List<Player> friends = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            friends.add(new Player(UUID.randomUUID(), rating, NOW.minusSeconds(waitedFor)));
+        }
+        Party party = Party.of(friends, NOW.minusSeconds(waitedFor));
+        index.insert(party);
+        heap.insert(party);
+        return party;
+    }
+
+    /**
      * Nine players spread across nine ratings around 1500, none of them the
      * anchor's own rating, all waiting less than the anchor.
      *
@@ -248,6 +263,25 @@ class MatchMakerTest {
                 "A dropped member is not seated again"));
     }
 
+    @Test void testSelectionMembersIsASnapshotNotALiveView() {
+        // formLobby re-reads members() every round for this reason. The two
+        // sides are the selection's state; members() is a reading of them, so
+        // a caller holding one across a drop is looking at a lobby that has
+        // since changed. Nothing throws when that happens, it just verifies
+        // the wrong entries forever.
+        List<Player> queued = joinCluster(1000, 12);
+
+        MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
+        selection.fill();
+        List<QueueEntry> captured = selection.members();
+        selection.drop(List.copyOf(captured.subList(8, 10)));
+
+        assertEquals(MatchMaker.LOBBY_SIZE, captured.size(),
+                "The captured list is a snapshot, so it still names the dropped two");
+        assertEquals(8, selection.members().size(),
+                "The selection itself lost them, which is what a caller must re-read to see");
+    }
+
     @Test void testSelectionCannotFillWithoutCandidatesNeg() {
         List<Player> queued = joinCluster(1000, 9);
 
@@ -364,6 +398,98 @@ class MatchMakerTest {
         assertEquals(0, matcher.contentionCount(),
                 "Nobody took a member, so the failure is not contention");
         assertEquals(0, matcher.retryCount(), "There was nothing to retry");
+    }
+
+    // teams
+
+    @Test void testALobbyIsFiveASide() {
+        joinCluster(1000, 10);
+
+        Lobby lobby = matcher.formLobby(NOW).orElseThrow();
+
+        assertEquals(MatchMaker.TEAM_SIZE, lobby.teamA().size(), "Team A holds five");
+        assertEquals(MatchMaker.TEAM_SIZE, lobby.teamB().size(), "Team B holds five");
+    }
+
+    @Test void testTheAnchorLeadsTeamAPos() {
+        List<Player> joined = joinCluster(1000, 10);
+
+        assertEquals(joined.get(0), matcher.formLobby(NOW).orElseThrow().teamA().get(0),
+                "The anchor is seated first, and the first side is filled first");
+    }
+
+    @Test void testAPartyLandsWhollyOnOneSidePos() {
+        // The party waits longest, so it anchors and takes three of team A.
+        Party party = joinParty(1000, 3, 100);
+        joinCluster(1000, 7);
+
+        Lobby lobby = matcher.formLobby(NOW).orElseThrow();
+        long onA = party.members().stream().filter(lobby.teamA()::contains).count();
+
+        assertEquals(3, onA, "Friends who queued together play together, never split across sides");
+    }
+
+    @Test void testAPartySeatsEveryoneInIt() {
+        Party party = joinParty(1000, 4, 100);
+        joinCluster(1000, 6);
+
+        Lobby lobby = matcher.formLobby(NOW).orElseThrow();
+
+        assertTrue(lobby.members().containsAll(party.members()),
+                "A party is seated whole or not at all, so all four are in the lobby");
+    }
+
+    @Test void testThreeThreesAndASoloCannotFormALobbyNeg() {
+        // Ten seats and every consent check passes, but no subset of these
+        // adds up to a side, so counting to ten rather than to five and five
+        // would form a lobby that cannot be played.
+        joinParty(1000, 3, 100);
+        joinParty(1000, 3, 90);
+        joinParty(1000, 3, 80);
+        join(1000, 70);
+
+        assertEquals(Optional.empty(), matcher.formLobby(NOW),
+                "A lobby that cannot be split into two sides must never form");
+    }
+
+    @Test void testAPartyTooLargeForEitherSideIsPassedOverNeg() {
+        // The anchoring party takes three of team A, the next three of team B.
+        // Both sides then have two free, so the third party of three fits
+        // neither and the solos have to finish the lobby.
+        joinParty(1000, 3, 100);
+        joinParty(1000, 3, 90);
+        Party passedOver = joinParty(1000, 3, 80);
+        for (int i = 0; i < 4; i++) {
+            join(1000, 70 - i);
+        }
+
+        Lobby lobby = matcher.formLobby(NOW).orElseThrow();
+
+        assertEquals(MatchMaker.TEAM_SIZE, lobby.teamA().size(), "Team A is still five");
+        assertEquals(MatchMaker.TEAM_SIZE, lobby.teamB().size(), "Team B is still five");
+        assertTrue(passedOver.members().stream().noneMatch(lobby.members()::contains),
+                "A party that fits neither side is passed over rather than split");
+    }
+
+    @Test void testAPartyCountsItsMembersAgainstTheLobbyPos() {
+        // Two parties of five fill the lobby on their own.
+        joinParty(1000, 5, 100);
+        joinParty(1000, 5, 90);
+
+        Lobby lobby = matcher.formLobby(NOW).orElseThrow();
+
+        assertEquals(MatchMaker.LOBBY_SIZE, lobby.members().size(),
+                "Two parties of five are a full lobby, one on each side");
+    }
+
+    @Test void testAPartyLeavesBothStructuresOnCommit() {
+        Party party = joinParty(1000, 4, 100);
+        joinCluster(1000, 6);
+
+        matcher.formLobby(NOW).orElseThrow();
+
+        assertFalse(index.contains(party.id()), "A matched party leaves the index as one entry");
+        assertFalse(heap.contains(party.id()), "A matched party leaves the heap as one entry");
     }
 
     // clock skew
