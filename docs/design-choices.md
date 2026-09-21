@@ -8,12 +8,101 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Matching under contention](#matching-under-contention)
-2. [Selecting a lobby](#selecting-a-lobby)
-3. [Fairness and waiting](#fairness-and-waiting)
-4. [Indexing players by skill](#indexing-players-by-skill)
-5. [The domain model](#the-domain-model)
-6. [Repository and build](#repository-and-build)
+1. [Parties and teams](#parties-and-teams)
+2. [Matching under contention](#matching-under-contention)
+3. [Selecting a lobby](#selecting-a-lobby)
+4. [Fairness and waiting](#fairness-and-waiting)
+5. [Indexing players by skill](#indexing-players-by-skill)
+6. [The domain model](#the-domain-model)
+7. [Repository and build](#repository-and-build)
+
+## Parties and teams
+
+### The race test queues parties as well as solos
+
+**Options.** Keep the race test on its 300 solo players and test parties single threaded, or mix parties into the contended population.
+
+**Chosen.** Mixed. A party is claimed as one entry, so the anchor claim and the verify should keep it whole, but that is an argument, and every race the engine has had looked fine as an argument until eight threads ran it. Half of 280 people queue in parties, sizes cycling two, three, four, five in a fixed order, each party followed by as many solos. Solos fill the gaps parties leave: a queue of only four stacks forms nothing, since each side is left one seat short, and a round where nothing forms never races.
+
+The order is fixed rather than random so a failing round reproduces.
+
+**Cost.** One shape of population, where a random one would wander into shapes nobody thought of. Two existing checks had to change units, since the engine claims entries and lobbies hold people: the nobody lost check now sums entry sizes, and the heap check looks up a seated player's entry first. Unchanged, the first fails on a correct run and the second passes on any run.
+
+### A lobby is two sides of five
+
+**Options.** Count ten seats into one list, as the walk did before parties, and split into teams afterwards, or fill two sides of five as the walk goes.
+
+**Chosen.** Two sides during the walk. A party must sit on one team, and ten seats filled without regard to sides can be unsplittable: three parties of three and a solo fill every seat, and no subset of them adds up to five. Filling sides directly means every lobby that forms is already playable.
+
+A candidate goes to the first side with room for all of it, team A before team B, and is passed over if neither has room. The check happens before seating and nothing seated is ever undone, so the walk stays one directional and never backtracks.
+
+**Cost.** The walk can strand seats. A solo anchor and a four stack fill team A, a second four stack leaves team B one short, and if no solo remains in the window the pass fails holding nine usable players. The anchor cools and returns with a wider radius, so nothing breaks, but it is a second way for the greedy walk to miss a lobby that exists.
+
+Measured, it is rare while solos are plentiful and dominant once they run out. 20k people, normal spread, eight workers, three seconds, three repeats: with half the people in parties, 2 passes stranded and nobody was left queued. With nine in ten in parties, 27318 passes stranded and 2000 people were never matched, because the parties left over had sizes that no combination makes into two fives. The queue in that run is closed, so no new solo ever arrives to finish a side. A live queue keeps receiving them, which makes this a worst case rather than a steady state.
+
+### A party queues as one entry
+
+**Options.** Queue each member individually and keep them together during selection, or queue the party as a single entry.
+
+**Chosen.** One entry. A party with one shared queue time and one rating carries exactly what the index, the heap and the consent check consume, so it goes through all three unchanged. It is polled as one anchor, offered by the merge as one candidate, and checked for consent as one rating.
+
+Queueing members individually breaks on recruitment. The walk offers candidates one at a time and has no idea two of them are friends, so it can seat two of a three stack and leave the third. A single entry makes that impossible, because the merge never offers half of one.
+
+It is also cheaper. Every draw, consent check, verify and removal is paid once per entry, so a lobby of two five stacks costs about two of each where a lobby of solos costs ten. 20k people, normal spread, eight workers, fifteen repeats: 731 lobbies in 100ms with solos only, 1097 with half the people in parties, 1208 with nine in ten.
+
+**Cost.** The engine cannot see individual members' ratings, so it cannot check the party's internal spread. That rule is enforced when the party is formed and taken on trust from then on.
+
+### A sealed interface over two records
+
+**Options.** A party as a subclass of player, a shared abstract class, or a sealed interface that both implement.
+
+**Chosen.** `QueueEntry`, sealed over `Player` and `Party`. A record is final, so a party cannot extend a player, and a player is not a special case of a party anyway. The interface is small: id, rating, queue time, size and members. A player answers size one and a member list of itself, which is what lets `MatchMaker` treat both the same everywhere. Without that, every seat count and every commit would carry a branch on which kind of entry it holds.
+
+**Cost.** A player now carries two methods that only mean something for parties, and code that needs people rather than entries has to unpack members explicitly.
+
+### A party's rating is pulled toward its strongest member
+
+**Options.** The mean of the members, the highest rated member, the midpoint of the extremes, or the mean shifted toward the highest.
+
+**Chosen.** `mean + 0.5 * (max - mean)`, floored. The mean alone lets a strong player queue with weaker friends and play easier games. The highest member alone punishes every ordinary party that happens to have one stronger friend. The shift scales with the gap between the mean and the strongest member, so it is close to invisible on a tight party and large on an abusive one. A party of 1450, 1500 and 1550 moves by 25. Four players at 1000 with one at 3500 are rated 2500 rather than 1500. 0.25 barely moves either, and 0.75 starts charging ordinary parties.
+
+The shift is computed in floating point even though, at exactly 0.5, integer division gives the same answer for every possible party. Relying on that would make the constant a coincidence rather than a setting.
+
+**Cost.** Dilution. Because the base is the mean, adding more low rated friends pulls the rating back down, so one strong player's influence weakens as the party grows. The same 3500 player with one friend at 1000 is rated 2875, and with four is rated 2500, 375 less. The midpoint has no dilution and was not chosen.
+
+### Parties are two to five, and their spread is capped
+
+**Options.** Cap party size at the lobby, at the team, or not at all, and cap the rating gap between members or leave it free.
+
+**Chosen.** Two to five, since a party has to fit on one team and a team is five. Ten would admit a party of seven that fits the lobby and fits no side. The gap between the highest and lowest member is capped at 2500, checked when the party is built.
+
+**Cost.** The spread cap is a rule the engine cannot enforce, for the reason above. When parties are formed over the network, the check and the admission of a new member have to be one indivisible step, or two concurrent joins each pass the check alone and together produce a party wider than the cap.
+
+### Membership is frozen while queued
+
+**Options.** Let members join or leave a queued party in place, or require the party to leave the queue, change, and queue again.
+
+**Chosen.** Frozen. The party's rating, spread and radius all come from its members, so a queued party that changed would be described wrongly by every structure holding it. Rebuilding means a new party with a new id and a new queue time. That also answers what happens to the accumulated wait: it resets, because the party that waited is not the party now queueing.
+
+A member leaving, even by disconnecting, dequeues the whole party. It is not requeued automatically as a smaller party, since a three stack is a different thing from a four stack and should not be committed to a match it never asked for.
+
+**Cost.** Waiting time is lost on any change, and the remaining players sit idle after a departure until one of them requeues.
+
+### A party's id is random
+
+**Options.** Derive the id from the members, so the same people always produce the same id, or generate a fresh one every time.
+
+**Chosen.** Random. A derived id looks attractive because a membership change would produce a new id automatically. It breaks when membership does not change: the same three people queueing an hour apart get the same id, so a worker holding the old entry would verify against the new one, find it present, and commit a party with an hour old queue time and the wrong radius.
+
+**Cost.** A party's id means nothing outside the engine, so whatever forms parties upstream needs its own handle on one and a way to associate the two.
+
+### The constructor verifies the stored rating
+
+**Options.** Trust the caller to pass the right rating, hide construction behind a factory, or recompute and reject a mismatch.
+
+**Chosen.** Recompute and reject. A record's canonical constructor is public, so a factory is a convention rather than a guarantee, and a party whose stored rating disagrees with its members would fail silently in every structure that files it by rating. `Party.of` computes the rating for the caller; the constructor checks it whoever calls.
+
+**Cost.** Every party computes its rating twice when built through the factory.
 
 ## Matching under contention
 
@@ -41,7 +130,7 @@ The two problems with an unsynchronised selection are that it reads live views a
 
 **Chosen.** Claim. Anchors are the longest waiters and the merge offers those first, so every worker's candidate draw began with the other workers' anchors. Measured over ten rounds at maximum contention, 464 passes were abandoned because the anchor had been recruited elsewhere, and the retry path never executed once.
 
-**Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued player is in exactly one place at any moment, which is also what party matching will need.
+**Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued entry is in exactly one place at any moment.
 
 ### A retry budget of the seats standing
 
@@ -52,6 +141,8 @@ The two problems with an unsynchronised selection are that it reads live views a
 Retrying is for contention, where another worker committed and the index has changed. A refill that finds nobody is starvation, where nothing has changed and asking again microseconds later returns the same answer, so that cools instead.
 
 **Cost.** A selection that starts at three seats and grows to nine keeps the budget of three, so a lobby that became valuable mid pass is not credited for it. Termination is worth more than the credit.
+
+**Amended.** The budget was computed as members seated minus members lost, which was the seat count only while every member was one person. With parties it counts seats explicitly, each entry contributing its size, so losing a five stack costs a pass five seats rather than one.
 
 ### A retry resumes the walk rather than re-seeding it
 
@@ -91,6 +182,8 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** A lobby fills with the other stragglers, who are precisely the players furthest from the rating mass. Fairness and match quality pull against each other here. The radius caps how bad it gets.
 
+**Amended.** Still longest waiting first, but a candidate is now also skipped when neither team has room for all of it. The walk previously stopped at ten seats in one list; it now fills two teams of five.
+
 ### One attempt per call
 
 **Options.** Loop internally until something forms, or return after one attempt.
@@ -99,7 +192,7 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
-**Amended, 10 September 2026.** Still one anchor per call, but no longer one attempt: a pass that loses a member to another worker refills and verifies again, within a budget. The termination argument survives, since the budget is set once and decremented, and every call still shrinks the heap.
+**Amended.** Still one anchor per call, but no longer one attempt: a pass that loses a member to another worker refills and verifies again, within a budget. The termination argument survives, since the budget is set once and decremented, and every call still shrinks the heap.
 
 ### A fixed cooldown for failed anchors
 
@@ -109,7 +202,9 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** 10 seconds is a constant with nothing behind it, and no failure count is stored, so a player failing repeatedly goes unnoticed.
 
-**Amended, 10 September 2026.** The period is a constructor argument now, defaulting to the same ten seconds. It is policy rather than physics, and a cooldown longer than a measurement window makes the measurement about the cooldown. Cooling also records its cause, since an anchor with no lobby available and an anchor that lost too many races are different facts about the queue wearing the same treatment.
+**Amended.** The period is a constructor argument now, defaulting to the same ten seconds. It is policy rather than physics, and a cooldown longer than a measurement window makes the measurement about the cooldown. Cooling also records its cause, since an anchor with no lobby available and an anchor that lost too many races are different facts about the queue wearing the same treatment.
+
+**Amended.** A third cause, stranded, split out of starvation. A short pass counts as stranded when the walk turned away a candidate who would have consented but fit neither team, and as starvation otherwise. Without the split, a lobby lost to party sizes and a window with nobody in range read as the same number. A candidate turned away who would also have failed consent does not count, since room was never what kept them out.
 
 ### Cooling bars anchoring, not matching
 
@@ -191,7 +286,7 @@ The stream is sequential deliberately. Parallel would destroy the ordering the c
 
 **Cost.** The interview answer is now about why `TreeMap` was chosen rather than about a tree that was built. Weaker looking, and honest. No benchmark numbers survive, since the harness measured a lazy view against a full materialisation and was not worth repairing.
 
-**Reversed, 10 September 2026, to `ConcurrentSkipListMap`.** Matching now selects candidates without holding the lock, which means iterating a window while another worker commits into it. A `TreeMap` iterator is fail fast, so workers were surviving `ConcurrentModificationException` mid pass, and fail fast is documented as best effort, so the silent corruption behind it could not be ruled out either. Copying the window instead would destroy the laziness the whole index exists for, and taking the lock during selection would serialise the expensive part of a pass.
+**Reversed, to `ConcurrentSkipListMap`.** Matching now selects candidates without holding the lock, which means iterating a window while another worker commits into it. A `TreeMap` iterator is fail fast, so workers were surviving `ConcurrentModificationException` mid pass, and fail fast is documented as best effort, so the silent corruption behind it could not be ruled out either. Copying the window instead would destroy the laziness the whole index exists for, and taking the lock during selection would serialise the expensive part of a pass.
 
 A skip list is still an ordered map implementing `NavigableMap`, so range queries, `subMap` and the 5000 entry bound are all unchanged. What changes is that iteration is weakly consistent instead of fail fast.
 
@@ -213,7 +308,7 @@ A skip list is still an ordered map implementing `NavigableMap`, so range querie
 
 **Cost.** The guarantee is implicit. It holds only because insertion happens to be chronological, and nothing in the type system says so.
 
-**Reversed, 10 September 2026, to `ConcurrentSkipListSet` ordered by wait time.** The same concurrent iteration problem as the map above, and a bucket iterator is live for far longer than the map's, since it stays open for the whole candidate walk.
+**Reversed, to `ConcurrentSkipListSet` ordered by wait time.** The same concurrent iteration problem as the map above, and a bucket iterator is live for far longer than the map's, since it stays open for the whole candidate walk.
 
 The implicit ordering cost disappears with it. The order is now a property of the type, which matters once players arrive over a message queue and delivery order stops being join order.
 
@@ -239,6 +334,8 @@ Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper 
 
 **Cost.** The caller sees an internal shape, so the index and the merge are coupled to each other.
 
+**Amended.** Buckets hold queue entries rather than players, and the method was renamed from `playersInRange` to `entriesInRange` to say so. `playerCount` became `entryCount` for the same reason: a queued party is one entry, so the count no longer equals the number of people waiting.
+
 ### Range queries are lazy
 
 **Options.** A materialised list, an iterator, or a stream of live bucket views.
@@ -257,7 +354,7 @@ A stream rather than an iterator because it composes: `flatMap`, `limit` and `ta
 
 **Cost.** `SkillIndex` is not authoritative about its own contents. The same id inserted at two different ratings lands in two buckets and both inserts succeed, structurally the same defect that ended the AVL attempt. An upstream check is a policy, not a guarantee, and two threads can interleave through it. Due for revisit when the worker pool lands.
 
-**Reversed, 10 September 2026.** A map from id to player now sits beside the ordered map and is the authority on what is queued. The revisit was forced by the concurrency fix, which has to ask whether an id is still queued at all, and a rating keyed index can only answer whether a player is queued at a given rating.
+**Reversed.** A map from id to player now sits beside the ordered map and is the authority on what is queued. The revisit was forced by the concurrency fix, which has to ask whether an id is still queued at all, and a rating keyed index can only answer whether a player is queued at a given rating.
 
 Three consequences. Insert refuses a duplicate id whatever rating a second join carries, which closes the orphan entry above. Remove takes the id as the address and ignores the rating on the argument, so a caller holding a player whose rating has since changed still removes the right entry. The player count is the map's size, so it cannot drift from the contents.
 
@@ -273,6 +370,10 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Cost.** A change means constructing a new player and re inserting them, so the structures are updated rather than the object.
 
+**Amended.** `Player` now implements `QueueEntry`, and every structure that held players holds entries instead: `SkillIndex`, `FairnessHeap`, `WaitTimeMerge`, `Overlap` and `MatchMaker`'s cooldown queue. The wait time comparator moved from `Player.BY_WAIT_TIME` to `QueueEntry.BY_WAIT_TIME`. Behaviour for solo players is unchanged, which the existing tests showed by passing across the retyping.
+
+`Lobby` changed shape too. It was one list of ten members; it is now two lists, `teamA` and `teamB`, with `members()` kept as a method returning both, team A first. The anchor is first on team A, so `anchor()` still answers the same player.
+
 ### Identity is the id alone
 
 **Options.** The record's generated equality over all three components, or an override on id.
@@ -280,6 +381,8 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 **Chosen.** The override. A player reconstructed on the far side of a message queue at milestone 4 will not carry a bit identical queue time, and removal must still find them.
 
 **Cost.** Equality disagrees with the record's own components, which surprises a reader expecting generated behaviour. Two players with the same id and different ratings compare equal despite occupying different buckets, which is the hole the missing side index leaves open.
+
+**Amended.** `Party` overrides equality the same way, so identity by id alone is now the contract of `QueueEntry` rather than a property of `Player` only.
 
 ## Repository and build
 

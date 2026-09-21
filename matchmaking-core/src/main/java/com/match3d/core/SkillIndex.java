@@ -11,16 +11,16 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.stream.Stream;
 
 /**
- * Queued players in rating order, answering "everyone rated between low and
+ * Queued entries in rating order, answering "everyone rated between low and
  * high". An ordered map keyed by rating, one bucket per rating, so it is
- * bounded by the 5000 possible ratings however many players queue. Buckets
+ * bounded by the 5000 possible ratings however many entries queue. Buckets
  * hold wait time order.
  *
- * With nr occupied ratings, nb players in a bucket and b buckets in a window:
- * insert and remove are O(log nr + log nb), playersInRange is O(log nr + b)
- * and lazy. No term is the number of queued players.
+ * With nr occupied ratings, nb entries in a bucket and b buckets in a window:
+ * insert and remove are O(log nr + log nb), entriesInRange is O(log nr + b)
+ * and lazy. No term is the number of queued entries.
  *
- * A bucket exists if and only if it holds a player.
+ * A bucket exists if and only if it holds an entry.
  *
  * The id map beside it is the authority on what is queued. Every mutation
  * touches both it and a bucket, in insert and remove and nowhere else. A write
@@ -28,25 +28,25 @@ import java.util.stream.Stream;
  *
  * Both levels are skip lists, so a window may be iterated while another thread
  * mutates the index: iteration is weakly consistent and never throws, and a
- * drawn player may already have left. Mutation still needs the caller's mutual
+ * drawn entry may already have left. Mutation still needs the caller's mutual
  * exclusion, since a pass spans several structures.
  */
 public final class SkillIndex {
 
-    private final NavigableMap<Integer, Set<Player>> byRating = new ConcurrentSkipListMap<>();
-    private final Map<UUID, Player> byId = new HashMap<>();
+    private final NavigableMap<Integer, Set<QueueEntry>> byRating = new ConcurrentSkipListMap<>();
+    private final Map<UUID, QueueEntry> byId = new HashMap<>();
 
-    /** Adds a player. False if that id is already queued, at any rating. */
-    public boolean insert(Player player) {
-        if (byId.containsKey(player.id())) return false;
-        byRating.computeIfAbsent(player.rating(), r -> newBucket()).add(player);
-        byId.put(player.id(), player);
+    /** Adds an entry. False if that id is already queued, at any rating. */
+    public boolean insert(QueueEntry entry) {
+        if (byId.containsKey(entry.id())) return false;
+        byRating.computeIfAbsent(entry.rating(), r -> newBucket()).add(entry);
+        byId.put(entry.id(), entry);
         return true;
     }
 
     /** Removes by id, deleting the bucket if it empties. False if not queued. */
     public boolean remove(UUID id) {
-        Player queued = byId.remove(id);
+        QueueEntry queued = byId.remove(id);
         if (queued == null) return false;
 
         byRating.computeIfPresent(queued.rating(), (rating, bucket) -> {
@@ -57,16 +57,16 @@ public final class SkillIndex {
     }
 
     /** The rating on the argument is ignored, the id is the address. */
-    public boolean remove(Player player) {
-        return remove(player.id());
+    public boolean remove(QueueEntry entry) {
+        return remove(entry.id());
     }
 
     /**
      * Wait time order is the comparator's, not insertion order, so a bucket is
      * ordered by definition rather than by arrivals happening to be in order.
      */
-    private static Set<Player> newBucket() {
-        return new ConcurrentSkipListSet<>(Player.BY_WAIT_TIME);
+    private static Set<QueueEntry> newBucket() {
+        return new ConcurrentSkipListSet<>(QueueEntry.BY_WAIT_TIME);
     }
 
     /** Whether that id is queued, at any rating. */
@@ -81,13 +81,13 @@ public final class SkillIndex {
      * Lazy, over live views rather than copies, so the caller must finish
      * drawing before mutating the index.
      */
-    public Stream<Set<Player>> playersInRange(int low, int high) {
+    public Stream<Set<QueueEntry>> entriesInRange(int low, int high) {
         return byRating.subMap(low, true, high, true).values().stream()
                        .map(Collections::unmodifiableSet);
     }
 
-    /** Players queued, across all ratings. */
-    public int playerCount() {
+    /** Entries queued, across all ratings. A party counts once. */
+    public int entryCount() {
         return byId.size();
     }
 

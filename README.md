@@ -46,13 +46,13 @@
 
 ## About the project
 
-Match3D accepts players into a skill based queue and matches them into balanced ten player lobbies. The queue itself is not the point of focus, what the queue has to reconcile is. A player wants a lobby full of players at a similar rating to their own, but at the same time they want reasonable queue times. Those two aspects pull against one another, and the engine must decide and optimise how much match quality to trade for how much waiting.
+Match3D accepts players into a skill based queue, alone or in parties of up to five, and matches them into balanced lobbies of two teams of five. A party always plays together, on one team. The queue itself is not the point of focus, what the queue has to reconcile is. A player wants a lobby full of players at a similar rating to their own, but at the same time they want reasonable queue times. Those two aspects pull against one another, and the engine must decide and optimise how much match quality to trade for how much waiting.
 
 The engine is a standalone module with no web framework and no network code, so it can be exercised and reasoned about on its own. Two services sit around it, coordinating only over a message queue.
 
 ### Project status
 
-The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, and the concurrency work that lets several worker threads run it against one shared queue, covered by 146 tests and a benchmark. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several worker threads run it against one shared queue, and parties queued as a single entry and seated on one team, covered by 194 tests and a benchmark. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -109,7 +109,7 @@ Dashed means not built yet.
 
 | Module | Holds | Status |
 |---|---|---|
-| `matchmaking-core` | Domain model, skill index, fairness heap, widening function, matching algorithm, concurrency | Built |
+| `matchmaking-core` | Domain model, parties, skill index, fairness heap, widening function, matching algorithm, concurrency | Built |
 | `common` | Shared event types and DTOs used by both services | Skeleton only |
 | `intake-service` | REST endpoints for join, leave, status, party formation | Skeleton only |
 | `matchmaking-service` | Consumes queue events, runs the engine, persists, exposes query endpoints | Skeleton only |
@@ -162,7 +162,7 @@ Not yet implemented.
 - [x] Milestone 0, repo, CI, and the branch to pull request workflow
 - [x] Milestone 1, core engine, skill index, fairness heap, and matching algorithm
 - [x] Milestone 2, concurrency, the race reproduced and fixed
-- [ ] Milestone 3, `MatchmakingStrategy` with skill based and party aware implementations
+- [x] Milestone 3, parties, queued as one entry and always seated on one team of five
 - [ ] Milestone 4, split into two services over RabbitMQ, REST API
 - [ ] Milestone 5, PostgreSQL persistence and Elo style rating updates
 - [ ] Milestone 6, Docker images and Compose for local development
@@ -174,6 +174,8 @@ Not yet implemented.
 ## Limitations
 
 * Matching is greedy. It can miss a valid lobby that exists elsewhere in the queue.
+* A lobby forms only when its entries fill two teams of exactly five, and a party is never split. Once solos run out, parties whose sizes cannot combine into fives wait until someone smaller joins. In a closed benchmark queue of 20k people, nine in ten of them in parties, 2000 were never matched.
+* The engine sees one derived rating per party, so it cannot check the gap between members. That limit has to be enforced where parties are formed, in the intake service, which is not built yet.
 * Every commit serialises through one lock, so the engine scales by making passes cheap rather than by running more of them. Sharding the queue by rating band is the recorded next step.
 * Matching runs in one process. Several threads share one engine, but nothing coordinates two engines, so scaling out is a design question rather than a configuration one.
 * The benchmark measures throughput on a synthetic population. No latency or queue time figure is measured, and the widening curve's constants have no data behind them.

@@ -18,53 +18,89 @@ class LobbyTest {
         return new Player(UUID.randomUUID(), 1000, BASE.plusSeconds(waitedFor));
     }
 
-    /** Ten players, the first of them the one the matcher would have anchored on. */
-    private static List<Player> tenPlayers() {
+    /** Five players, numbered from the given offset so the sides differ. */
+    private static List<Player> side(int from) {
         List<Player> members = new ArrayList<>();
-        for (int i = 0; i < 10; i++) {
+        for (int i = from; i < from + 5; i++) {
             members.add(queuedAt(i));
         }
         return members;
     }
 
-    // construction
-
-    @Test void testNullMembersNeg() {
-        assertThrows(NullPointerException.class, () -> new Lobby(null),
-                "A lobby without members is not a lobby");
+    /** A full lobby, the first side holding the player the matcher anchored on. */
+    private static Lobby lobby() {
+        return new Lobby(side(0), side(5));
     }
 
-    @Test void testMembersAreReadBackInOrder() {
-        List<Player> members = tenPlayers();
+    // construction
 
-        assertEquals(members, new Lobby(members).members(),
-                "The order the matcher chose is the order the lobby keeps");
+    @Test void testNullTeamANeg() {
+        assertThrows(NullPointerException.class, () -> new Lobby(null, side(5)),
+                "A lobby missing a side is not a lobby");
+    }
+
+    @Test void testNullTeamBNeg() {
+        assertThrows(NullPointerException.class, () -> new Lobby(side(0), null),
+                "A lobby missing a side is not a lobby");
+    }
+
+    @Test void testSidesAreReadBackInOrder() {
+        List<Player> teamA = side(0);
+        List<Player> teamB = side(5);
+        Lobby lobby = new Lobby(teamA, teamB);
+
+        assertEquals(teamA, lobby.teamA(), "The order the matcher chose is the order team A keeps");
+        assertEquals(teamB, lobby.teamB(), "The order the matcher chose is the order team B keeps");
+    }
+
+    // members
+
+    @Test void testMembersAreBothSidesTeamAFirst() {
+        List<Player> teamA = side(0);
+        List<Player> teamB = side(5);
+        List<Player> expected = new ArrayList<>(teamA);
+        expected.addAll(teamB);
+
+        assertEquals(expected, new Lobby(teamA, teamB).members(),
+                "Members is both sides, team A first, so the anchor leads");
+    }
+
+    @Test void testMembersHoldsEveryone() {
+        assertEquals(10, lobby().members().size(),
+                "Five a side is ten players");
     }
 
     // immutability
 
-    @Test void testMembersAreCopiedFromTheCaller() {
-        List<Player> members = tenPlayers();
-        Lobby lobby = new Lobby(members);
-        members.clear();
+    @Test void testSidesAreCopiedFromTheCaller() {
+        List<Player> teamA = side(0);
+        Lobby lobby = new Lobby(teamA, side(5));
+        teamA.clear();
 
-        assertEquals(10, lobby.members().size(),
-                "The lobby copies on construction, so the caller cannot empty it afterwards");
+        assertEquals(5, lobby.teamA().size(),
+                "The lobby copies on construction, so the caller cannot empty a side afterwards");
+    }
+
+    @Test void testASideCannotBeModifiedNeg() {
+        Lobby lobby = lobby();
+
+        assertThrows(UnsupportedOperationException.class, () -> lobby.teamA().add(queuedAt(99)),
+                "A formed lobby is final, nobody joins it after the fact");
     }
 
     @Test void testMembersCannotBeModifiedNeg() {
-        Lobby lobby = new Lobby(tenPlayers());
+        Lobby lobby = lobby();
 
         assertThrows(UnsupportedOperationException.class, () -> lobby.members().add(queuedAt(99)),
-                "A formed lobby is final, nobody joins it after the fact");
+                "The combined view is as final as the sides it reads");
     }
 
     // anchor
 
-    @Test void testAnchorIsTheFirstMember() {
-        List<Player> members = tenPlayers();
+    @Test void testAnchorIsTheFirstPlayerOnTeamA() {
+        List<Player> teamA = side(0);
 
-        assertEquals(members.get(0), new Lobby(members).anchor(),
-                "The anchor is held first, so the lobby knows whose wait set its window");
+        assertEquals(teamA.get(0), new Lobby(teamA, side(5)).anchor(),
+                "The anchor is seated first on team A, so the lobby knows whose wait set its window");
     }
 }
