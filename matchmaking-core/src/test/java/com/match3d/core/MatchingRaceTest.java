@@ -3,7 +3,9 @@ package com.match3d.core;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -16,7 +18,11 @@ class MatchingRaceTest {
     /** One rating, so every worker's window covers every other worker's candidates. */
     private static final int RATING = 1500;
 
-    private static final int PLAYERS = 300;
+    /** People per round, half alone and half in parties. A multiple of 28, one full cycle. */
+    private static final int PLAYERS = 280;
+
+    /** Party sizes in queue order, repeated. Each party is followed by as many solos. */
+    private static final int[] PARTY_SIZES = {2, 3, 4, 5};
     private static final int WORKERS = 8;
     private static final int RUN_MILLIS = 25;
 
@@ -24,7 +30,8 @@ class MatchingRaceTest {
     private static final int ROUNDS = 10;
 
     /** Everything one run of the pool leaves behind, for a test to read at rest. */
-    private record Round(List<Player> joined, MatchingWorkerPool.Run run,
+    private record Round(List<QueueEntry> joined, Map<UUID, QueueEntry> entryOf,
+                         MatchingWorkerPool.Run run,
                          SkillIndex index, FairnessHeap heap, MatchMaker matcher) {
 
         /** Every player seated in a lobby, duplicates kept, since duplicates are the point. */
@@ -51,24 +58,43 @@ class MatchingRaceTest {
         FairnessHeap heap = new FairnessHeap();
         MatchMaker matcher = new MatchMaker(index, heap);
 
-        Instant now = Instant.now();
-        List<Player> joined = new ArrayList<>();
-        for (int i = 0; i < PLAYERS; i++) {
-            Player player = new Player(UUID.randomUUID(), RATING, now.minusSeconds(PLAYERS - i));
-            index.insert(player);
-            heap.insert(player);
-            joined.add(player);
+        List<QueueEntry> joined = population(Instant.now().minusSeconds(PLAYERS));
+        Map<UUID, QueueEntry> entryOf = new HashMap<>();
+        for (QueueEntry entry : joined) {
+            index.insert(entry);
+            heap.insert(entry);
+            entry.members().forEach(member -> entryOf.put(member.id(), entry));
         }
 
         MatchingWorkerPool pool = new MatchingWorkerPool(matcher, WORKERS);
         pool.start();
         Thread.sleep(RUN_MILLIS);
 
-        return new Round(joined, pool.stop(), index, heap, matcher);
+        return new Round(joined, entryOf, pool.stop(), index, heap, matcher);
+    }
+
+    /** Cycles through PARTY_SIZES, each party then as many solos, oldest first. */
+    private static List<QueueEntry> population(Instant start) {
+        List<QueueEntry> entries = new ArrayList<>();
+        Instant at = start;
+        for (int people = 0, i = 0; people < PLAYERS; i++) {
+            int size = PARTY_SIZES[i % PARTY_SIZES.length];
+
+            List<Player> members = new ArrayList<>();
+            for (int m = 0; m < size; m++) members.add(new Player(UUID.randomUUID(), RATING, at));
+            entries.add(Party.of(members, at));
+            at = at.plusSeconds(1);
+
+            for (int s = 0; s < size; s++) {
+                entries.add(new Player(UUID.randomUUID(), RATING, at));
+                at = at.plusSeconds(1);
+            }
+            people += 2 * size;
+        }
+        return entries;
     }
 
     // one player, one lobby
-
     @Test void testAPlayerIsNeverInTwoLobbies() throws InterruptedException {
         for (int r = 0; r < ROUNDS; r++) {
             Round round = round();
@@ -100,13 +126,41 @@ class MatchingRaceTest {
         }
     }
 
+    @Test void testAPartyIsNeverSplit() throws InterruptedException {
+        for (int r = 0; r < ROUNDS; r++) {
+            Round round = round();
+
+            // Each team of each lobby gets its own number, so one set per
+            // entry says how many sides its members were spread across.
+            Map<QueueEntry, Set<Integer>> sidesOf = new HashMap<>();
+            Map<QueueEntry, Integer> seatedOf = new HashMap<>();
+            int side = 0;
+            for (Lobby lobby : round.run().lobbies()) {
+                for (List<Player> team : List.of(lobby.teamA(), lobby.teamB())) {
+                    for (Player player : team) {
+                        QueueEntry entry = round.entryOf().get(player.id());
+                        sidesOf.computeIfAbsent(entry, e -> new HashSet<>()).add(side);
+                        seatedOf.merge(entry, 1, Integer::sum);
+                    }
+                    side++;
+                }
+            }
+
+            seatedOf.forEach((entry, seated) -> {
+                assertEquals(entry.size(), seated, "A party is seated whole or not at all");
+                assertEquals(1, sidesOf.get(entry).size(), "A party sits on one team of one lobby");
+            });
+        }
+    }
+
     // nobody lost
 
     @Test void testEveryPlayerIsAccountedFor() throws InterruptedException {
         for (int r = 0; r < ROUNDS; r++) {
             Round round = round();
 
-            assertEquals(PLAYERS, round.matched().size() + round.queued().size(),
+            int playersQueued = round.queued().stream().mapToInt(QueueEntry::size).sum();
+            assertEquals(PLAYERS, round.matched().size() + playersQueued,
                     "Every player joined is either seated in a lobby or still queued");
         }
     }
@@ -116,7 +170,8 @@ class MatchingRaceTest {
             Round round = round();
 
             for (Player player : round.matched()) {
-                assertFalse(round.heap().contains(player.id()),
+                QueueEntry entry = round.entryOf().get(player.id());
+                assertFalse(round.heap().contains(entry.id()),
                         "A player already seated in a lobby must not be waiting to anchor another");
             }
         }
