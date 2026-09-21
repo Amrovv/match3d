@@ -53,6 +53,7 @@ public final class MatchMaker {
     private int retries = 0;
     private int contentionCooldowns = 0;
     private int starvationCooldowns = 0;
+    private int strandedCooldowns = 0;
     private int aborts = 0;
 
     private final Duration cooldown;
@@ -105,7 +106,9 @@ public final class MatchMaker {
                     List<QueueEntry> members = selection.members();
 
                     if (seats(members) < LOBBY_SIZE) {
-                        cool(anchor, now, false);
+                        if (selection.turnedAway()) strandedCooldowns++;
+                        else starvationCooldowns++;
+                        cool(anchor, now);
                         settled = true;
                         return Optional.empty();
                     }
@@ -127,7 +130,8 @@ public final class MatchMaker {
                         budget = seats(members) - seats(missing);
                     }
                     if (budget == 0) {
-                        cool(anchor, now, true);
+                        contentionCooldowns++;
+                        cool(anchor, now);
                         settled = true;
                         return Optional.empty();
                     }
@@ -188,10 +192,8 @@ public final class MatchMaker {
      * Under the lock. A matched anchor is counted as an abort rather than
      * cooled, since cooling would return them to the heap.
      */
-    private void cool(QueueEntry anchor, Instant now, boolean lostToContention) {
+    private void cool(QueueEntry anchor, Instant now) {
         index.insert(anchor);
-        if (lostToContention) contentionCooldowns++;
-        else starvationCooldowns++;
         cooling.add(new Pending(anchor, now.plus(cooldown)));
     }
 
@@ -224,6 +226,9 @@ public final class MatchMaker {
 
         private Overlap overlap;
 
+        /** A candidate who would have consented was passed over for lack of room. */
+        private boolean turnedAway = false;
+
         Selection(QueueEntry anchor, Instant now) {
             this.anchor = anchor;
             this.now = now;
@@ -249,10 +254,13 @@ public final class MatchMaker {
                 QueueEntry candidate = cursor.next();
                 if (teamA.contains(candidate) || teamB.contains(candidate)) continue;
 
-                List<QueueEntry> side = sideWithRoomFor(candidate);
-                if (side == null) continue;
-
                 Overlap extended = overlap.extendedBy(candidate, radiusOf(candidate, now));
+                List<QueueEntry> side = sideWithRoomFor(candidate);
+                if (side == null) {
+                    turnedAway |= extended.valid();
+                    continue;
+                }
+
                 if (extended.valid()) {
                     overlap = extended;
                     side.add(candidate);
@@ -295,6 +303,10 @@ public final class MatchMaker {
             both.addAll(teamA);
             both.addAll(teamB);
             return both;
+        }
+
+        boolean turnedAway() {
+            return turnedAway;
         }
 
         List<QueueEntry> teamA() {
@@ -366,6 +378,11 @@ public final class MatchMaker {
 
     int starvationCount() {
         return starvationCooldowns;
+    }
+
+    /** Short passes where a party that fit the window was turned away for room. */
+    int strandedCount() {
+        return strandedCooldowns;
     }
 
     int abortCount() {

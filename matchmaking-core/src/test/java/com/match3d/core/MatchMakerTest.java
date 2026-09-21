@@ -398,6 +398,34 @@ class MatchMakerTest {
         assertEquals(0, matcher.contentionCount(),
                 "Nobody took a member, so the failure is not contention");
         assertEquals(0, matcher.retryCount(), "There was nothing to retry");
+        assertEquals(0, matcher.strandedCount(), "Nobody was turned away for room");
+    }
+
+    @Test void testAPartyTurnedAwayForRoomIsCountedAsStranded() {
+        // Anchor and a four stack fill team A, a four stack leaves team B one
+        // short, and the last four stack consents but fits neither side.
+        join(1000, 100);
+        joinParty(1000, 4, 90);
+        joinParty(1000, 4, 80);
+        joinParty(1000, 4, 70);
+
+        assertEquals(Optional.empty(), matcher.formLobby(NOW), "Nine seated, one seat nobody fits");
+        assertEquals(1, matcher.strandedCount(), "A party that would have played was turned away");
+        assertEquals(0, matcher.starvationCount(), "Stranded and starved are counted apart");
+    }
+
+    @Test void testAPartyTurnedAwayThatWouldNotConsentIsStarvation() {
+        // The last four stack is inside the anchor's window, but its own
+        // radius after one second does not reach 1000, so room was never
+        // what kept it out.
+        join(1000, 300);
+        joinParty(1000, 4, 90);
+        joinParty(1000, 4, 80);
+        joinParty(1800, 4, 1);
+
+        assertEquals(Optional.empty(), matcher.formLobby(NOW), "No lobby existed for this anchor");
+        assertEquals(0, matcher.strandedCount(), "Only a candidate who would consent counts as stranded");
+        assertEquals(1, matcher.starvationCount(), "The failure is an empty window, not a full side");
     }
 
     // teams
