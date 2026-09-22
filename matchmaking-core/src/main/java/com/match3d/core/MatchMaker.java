@@ -54,7 +54,6 @@ public final class MatchMaker {
     private int contentionCooldowns = 0;
     private int starvationCooldowns = 0;
     private int strandedCooldowns = 0;
-    private int aborts = 0;
 
     private final Duration cooldown;
 
@@ -79,8 +78,10 @@ public final class MatchMaker {
      * since recomputing it from a later, fuller selection would let it grow and
      * the loop would not terminate.
      *
-     * Empty means the anchor could not fill a lobby, spent the budget losing
-     * members, or was itself matched elsewhere.
+     * Empty means the anchor found nobody left in range, was stranded by a
+     * party that fit neither side, or spent the budget losing members. The
+     * anchor itself cannot be lost, since it is claimed out of the index at
+     * poll and the verify never checks it.
      */
     public Optional<Lobby> formLobby(Instant now) {
         QueueEntry anchor;
@@ -119,11 +120,6 @@ public final class MatchMaker {
                         settled = true;
                         return Optional.of(new Lobby(playersIn(selection.teamA()),
                                                      playersIn(selection.teamB())));
-                    }
-
-                    if (missing.contains(anchor)) {
-                        aborts++;
-                        return Optional.empty();
                     }
 
                     if (budget < 0) {
@@ -168,7 +164,10 @@ public final class MatchMaker {
         return anchor;
     }
 
-    /** Under the lock. Members no longer queued, empty if all ten survive. */
+    /**
+     * Under the lock. Seated entries no longer queued, empty if all survive.
+     * Skips the anchor, who was claimed out of the index at poll.
+     */
     private List<QueueEntry> missing(List<QueueEntry> members) {
         List<QueueEntry> missing = new ArrayList<>();
         for (int i = 1; i < members.size(); i++) {
@@ -188,10 +187,7 @@ public final class MatchMaker {
         cooling.removeIf(pending -> members.contains(pending.entry()));
     }
 
-    /**
-     * Under the lock. A matched anchor is counted as an abort rather than
-     * cooled, since cooling would return them to the heap.
-     */
+    /** Under the lock. Returns the anchor to the index and starts their cooldown. */
     private void cool(QueueEntry anchor, Instant now) {
         index.insert(anchor);
         cooling.add(new Pending(anchor, now.plus(cooldown)));
@@ -383,9 +379,5 @@ public final class MatchMaker {
     /** Short passes where a party that fit the window was turned away for room. */
     int strandedCount() {
         return strandedCooldowns;
-    }
-
-    int abortCount() {
-        return aborts;
     }
 }

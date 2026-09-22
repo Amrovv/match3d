@@ -386,7 +386,6 @@ class MatchMakerTest {
         assertEquals(0, matcher.retryCount(), "Nothing was taken, so nothing was retried");
         assertEquals(0, matcher.starvationCount(), "A lobby formed, so no anchor was cooled");
         assertEquals(0, matcher.contentionCount(), "No budget was spent");
-        assertEquals(0, matcher.abortCount(), "The anchor was never at risk");
     }
 
     @Test void testAnAnchorWhoCannotFillALobbyIsCountedAsStarvation() {

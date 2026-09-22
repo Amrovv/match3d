@@ -132,6 +132,8 @@ The two problems with an unsynchronised selection are that it reads live views a
 
 **Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued entry is in exactly one place at any moment.
 
+**Amended.** The counter for passes that lost their anchor, and the test asserting it stayed at zero, were removed. The verify never checks the anchor, since the claim has already taken them out of the index, so the counter could not move and the test could not fail.
+
 ### A retry budget of the seats standing
 
 **Options.** Abandon the pass when a member is taken, retry without limit, or retry a bounded number of times.
@@ -188,7 +190,7 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Options.** Loop internally until something forms, or return after one attempt.
 
-**Chosen.** One attempt. Every call either seats ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold milestone 2's lock across an unbounded number of attempts.
+**Chosen.** One attempt. Every call either seats ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold the commit lock across an unbounded number of attempts.
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
@@ -233,6 +235,8 @@ The result is that the ordered sequence exists nowhere in memory. It is produced
 The stream is sequential deliberately. Parallel would destroy the ordering the class exists to provide.
 
 **Cost.** Two hazards the type system does not express. The stream is single use, and it draws from live views, so the index must not be mutated mid draw. Both are documented and both have tests.
+
+**Amended.** Since the index became skip lists, mutating it mid draw no longer throws. The hazard is now that an entry drawn may already have left, which the commit verifies.
 
 ## Fairness and waiting
 
@@ -366,7 +370,7 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Options.** Mutable objects updated in place, or immutable records replaced on change.
 
-**Chosen.** Records. Several structures, and soon several threads, hold the same player. A player whose fields change underneath a reader is a data race waiting for milestone 2, and mutating a rating in place would strand the player in the wrong bucket.
+**Chosen.** Records. Several structures, and soon several threads, hold the same player. A player whose fields change underneath a reader is a data race once workers run concurrently, and mutating a rating in place would strand the player in the wrong bucket.
 
 **Cost.** A change means constructing a new player and re inserting them, so the structures are updated rather than the object.
 
@@ -378,7 +382,7 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Options.** The record's generated equality over all three components, or an override on id.
 
-**Chosen.** The override. A player reconstructed on the far side of a message queue at milestone 4 will not carry a bit identical queue time, and removal must still find them.
+**Chosen.** The override. A player reconstructed on the far side of a message queue will not carry a bit identical queue time, and removal must still find them.
 
 **Cost.** Equality disagrees with the record's own components, which surprises a reader expecting generated behaviour. Two players with the same id and different ratings compare equal despite occupying different buckets, which is the hole the missing side index leaves open.
 

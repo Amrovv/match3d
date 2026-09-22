@@ -86,8 +86,8 @@ public final class WaitTimeMerge {
      * Buckets by rating in, entries by wait time out. The ordered sequence is
      * produced on demand and exists nowhere in memory.
      *
-     * Seeding consumes the bucket stream, so the index must not be mutated
-     * until the returned stream has been drawn from.
+     * Seeding consumes the bucket stream at once. Draws after that read the
+     * buckets live, so an entry drawn may already have left.
      */
     public static Stream<QueueEntry> byWaitTime(Stream<Set<QueueEntry>> buckets) {
         return lazily(new MergeIterator(buckets));

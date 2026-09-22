@@ -78,8 +78,8 @@ public final class SkillIndex {
      * Buckets between low and high inclusive, by rating, each internally by
      * wait time. Left in buckets so the caller can merge across them.
      *
-     * Lazy, over live views rather than copies, so the caller must finish
-     * drawing before mutating the index.
+     * Lazy, over live views rather than copies. Weakly consistent, so a drawn
+     * entry may already have left and the caller must verify before acting.
      */
     public Stream<Set<QueueEntry>> entriesInRange(int low, int high) {
         return byRating.subMap(low, true, high, true).values().stream()

@@ -52,7 +52,7 @@ The engine is a standalone module with no web framework and no network code, so 
 
 ### Project status
 
-The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several worker threads run it against one shared queue, and parties queued as a single entry and seated on one team, covered by 194 tests and a benchmark. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several worker threads run it against one shared queue, and parties queued as a single entry and seated on one team, covered by 193 tests and a benchmark. Everything around it is still a skeleton, so no service runs and nothing is persisted or containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

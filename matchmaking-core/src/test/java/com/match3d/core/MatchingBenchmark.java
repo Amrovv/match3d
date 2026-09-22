@@ -36,7 +36,7 @@ class MatchingBenchmark {
     }
 
     private record Result(int lobbies, int duplicates, int leftQueued, int retries,
-                          int contention, int starvation, int stranded, int aborts,
+                          int contention, int starvation, int stranded,
                           long elapsedMillis) {
     }
 
@@ -64,16 +64,16 @@ class MatchingBenchmark {
             new Workload("2k, s=400, 50% parties", 2000, 400, 0, 0.5, 8, RUN_MILLIS, REPEATS));
 
     @Test void reportAcrossWorkloads() throws InterruptedException {
-        System.out.printf("%n%-24s %8s %8s %7s %8s %9s %9s %9s %8s%n",
+        System.out.printf("%n%-24s %8s %8s %7s %8s %9s %9s %9s%n",
                 "workload", "lobbies", "seated", "queued", "retries", "contention",
-                "starved", "stranded", "aborts");
+                "starved", "stranded");
 
         for (Workload workload : WORKLOADS) {
             List<Result> runs = new ArrayList<>();
             for (int i = 0; i < workload.repeats(); i++) {
                 runs.add(run(workload));
             }
-            System.out.printf("%-24s %8d %8d %7d %8d %9d %9d %9d %8d%n",
+            System.out.printf("%-24s %8d %8d %7d %8d %9d %9d %9d%n",
                     workload.name(),
                     mean(runs, Result::lobbies),
                     mean(runs, Result::lobbies) * MatchMaker.LOBBY_SIZE,
@@ -81,8 +81,7 @@ class MatchingBenchmark {
                     mean(runs, Result::retries),
                     mean(runs, Result::contention),
                     mean(runs, Result::starvation),
-                    mean(runs, Result::stranded),
-                    mean(runs, Result::aborts));
+                    mean(runs, Result::stranded));
 
             int duplicates = runs.stream().mapToInt(Result::duplicates).sum();
             if (duplicates != 0) {
@@ -104,9 +103,9 @@ class MatchingBenchmark {
         run(warmup);
         run(warmup);
 
-        System.out.printf("%n%-24s %7s %8s %10s %8s %9s %9s %9s %8s%n",
+        System.out.printf("%n%-24s %7s %8s %10s %8s %9s %9s %9s%n",
                 "workload", "ms", "lobbies", "lobbies/s", "retries", "contention",
-                "starved", "stranded", "aborts");
+                "starved", "stranded");
 
         for (double partyShare : new double[] {0, 0.5, 0.9}) {
             for (int millis : new int[] {25, 50, 100}) {
@@ -119,11 +118,10 @@ class MatchingBenchmark {
                     runs.add(run(workload));
                 }
                 int lobbies = mean(runs, Result::lobbies);
-                System.out.printf("%-24s %7d %8d %10d %8d %9d %9d %9d %8d%n",
+                System.out.printf("%-24s %7d %8d %10d %8d %9d %9d %9d%n",
                         name, millis, lobbies, (long) lobbies * 1000 / millis,
                         mean(runs, Result::retries), mean(runs, Result::contention),
-                        mean(runs, Result::starvation), mean(runs, Result::stranded),
-                        mean(runs, Result::aborts));
+                        mean(runs, Result::starvation), mean(runs, Result::stranded));
             }
         }
         System.out.println();
@@ -158,8 +156,7 @@ class MatchingBenchmark {
 
         return new Result(run.lobbies().size(), seated.size() - distinct, queued,
                 matcher.retryCount(), matcher.contentionCount(),
-                matcher.starvationCount(), matcher.strandedCount(),
-                matcher.abortCount(), elapsed);
+                matcher.starvationCount(), matcher.strandedCount(), elapsed);
     }
 
     /**

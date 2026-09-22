@@ -153,7 +153,7 @@ flowchart TD
 
 **The anchor is claimed, the recruits are not.** Polling takes the anchor out of the heap and the index, so no other worker can recruit them mid pass. Without it, anchors were the most contested players in the queue: they are the longest waiters, and the merge offers longest waiters first. A cooled anchor is returned to the index, since cooling bars anchoring rather than recruitment, and any abnormal exit returns them to both structures.
 
-**A pass ends five ways**, counted separately: a lobby forms, the anchor had nobody left in range, the anchor was stranded by a party that fit neither team, the anchor spent its budget losing recruits, or the anchor was itself matched elsewhere. The last is impossible while the claim holds, and a test asserts it stays at zero.
+**A pass ends four ways**, counted separately: a lobby forms, the anchor had nobody left in range, the anchor was stranded by a party that fit neither team, or the anchor spent its budget losing recruits. The anchor itself cannot be lost to another worker, since the claim takes them out of the index before anyone else can draw them.
 
 **A retry resumes rather than restarts.** `Selection` holds the anchor, the merge cursor and the consent state for one pass. Losing a recruit drops them and refolds consent from those left, then the walk continues from where it stopped. Rebuilding instead would re-seed every bucket in the window, which is what a whole fresh pass costs.
 
@@ -334,7 +334,7 @@ Instead the index hands back buckets rather than players, which costs one refere
 
 An iterator does the producing because merging is inherently a pull, and it is wrapped as a sequential stream so the caller gets something composable instead. Sequential deliberately, since parallel would destroy the ordering.
 
-Two hazards come with it, neither expressible in the type system: the stream is single use, and it draws from live views, so the index must not be mutated mid draw. Both are documented and both have tests.
+Two hazards come with it, neither expressible in the type system: the stream is single use, and it draws from live views, so an entry drawn may already have left. The second is why the commit verifies. Both are documented and both have tests.
 
 ## The domain model
 
@@ -370,13 +370,13 @@ Derived from the structures, not measured. Every measured figure in this reposit
 
 ## Verification
 
-194 tests over the eleven core classes, plus a benchmark that reports rather than asserts. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
+193 tests over the eleven core classes, plus a benchmark that reports rather than asserts. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
 
 One known gap. `formLobby` reads the selection's members afresh on every retry, because they are a snapshot of the two teams and go stale after a drop. Removing that re-read survives the suite, since reaching a retry needs another worker to take a member mid pass and no test can arrange that on demand. The effect would be wasted retries rather than a wrong lobby.
 
 Two results are worth more than the count. Dropping the id tiebreak was caught by the heap's tie test and not by the merge's, because without it the order of equal elements is unspecified rather than wrong, so that test passes or fails by luck. And swapping the buckets back to a type that preserves insertion order is caught by exactly one test, the one that inserts out of chronological order, because every other ordering test inserts in order and passes either way.
 
-The concurrent tests read the structures after the workers have stopped rather than trying to catch an interleaving, since the evidence a race leaves is permanent while its timing is not. Two of them exist to keep the harness honest rather than the engine: one fails if a run produces no retries at all, which is what tells a working fix apart from one that was never contended, and one fails if any pass abandoned its anchor, which is the invariant the claim exists to provide.
+The concurrent tests read the structures after the workers have stopped rather than trying to catch an interleaving, since the evidence a race leaves is permanent while its timing is not. One exists to keep the harness honest rather than the engine: it fails if a run produces no retries at all, which is what tells a working fix apart from one that was never contended.
 
 ## The build and the pipeline
 
