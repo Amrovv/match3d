@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Every event survives the trip to JSON and back, and a broken message fails loudly. */
 class EventJsonTest {
 
     private static final Instant AT = Instant.parse("2026-09-22T14:03:11.412Z");

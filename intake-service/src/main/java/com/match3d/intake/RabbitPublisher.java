@@ -5,35 +5,36 @@ import java.io.UncheckedIOException;
 
 import com.match3d.common.EventJson;
 import com.match3d.common.Queues;
-import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.MessageProperties;
+
+import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.stereotype.Component;
 
 /**
- * Publishes to the queue matchmaking reads. Durable queue and persistent
- * messages, so a broker restart does not lose what was accepted.
- *
- * A channel is not safe across threads and Javalin serves requests on
- * several, so publish is synchronised.
+ * Publishes to the queue matchmaking reads, as persistent messages naming
+ * their event in the type property. RabbitTemplate is safe across threads.
  */
+@Component
 public final class RabbitPublisher implements EventPublisher {
 
-    private final Channel channel;
+    private final RabbitTemplate rabbit;
 
-    public RabbitPublisher(Channel channel) throws IOException {
-        this.channel = channel;
-        channel.queueDeclare(Queues.TO_MATCHMAKING, true, false, false, null);
+    public RabbitPublisher(RabbitTemplate rabbit) {
+        this.rabbit = rabbit;
     }
 
     @Override
-    public synchronized void publish(Object event) {
-        AMQP.BasicProperties properties = MessageProperties.PERSISTENT_BASIC.builder()
-                .type(event.getClass().getSimpleName())
-                .build();
+    public void publish(Object event) {
+        MessageProperties properties = new MessageProperties();
+        properties.setType(event.getClass().getSimpleName());
+        properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
         try {
-            channel.basicPublish("", Queues.TO_MATCHMAKING, properties, EventJson.toBytes(event));
-        } catch (IOException e) {
-            throw new UncheckedIOException("Broker did not take " + event, e);
+            rabbit.send("", Queues.TO_MATCHMAKING, new Message(EventJson.toBytes(event), properties));
+        } catch (AmqpException e) {
+            throw new UncheckedIOException(new IOException("Broker did not take " + event, e));
         }
     }
 }

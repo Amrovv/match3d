@@ -21,7 +21,7 @@ public final class QueueRegistry {
         if (entryToMembers.containsKey(entryId)) {
             return false;
         }
-        
+
         for (UUID member : members) {
             if (memberToEntry.containsKey(member)) {
                 return false;
@@ -50,5 +50,15 @@ public final class QueueRegistry {
     /** The entry this player is queued in, or null. */
     public synchronized UUID entryOf(UUID playerId) {
         return memberToEntry.get(playerId);
+    }
+
+    /** Whether an entry is queued under this id. */
+    public synchronized boolean contains(UUID entryId) {
+        return entryToMembers.containsKey(entryId);
+    }
+
+    /** Get the members associated with a given entry */
+    public synchronized List<UUID> membersOf(UUID entryId) {
+        return entryToMembers.get(entryId);
     }
 }

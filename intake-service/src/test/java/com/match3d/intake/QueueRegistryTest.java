@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** What intake believes about who is queued, including under concurrent joins. */
 class QueueRegistryTest {
 
     private final QueueRegistry registry = new QueueRegistry();
