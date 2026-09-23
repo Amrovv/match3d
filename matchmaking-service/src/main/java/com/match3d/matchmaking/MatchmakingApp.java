@@ -36,6 +36,21 @@ public class MatchmakingApp {
     }
 
     @Bean
+    RatingStore ratingStore() {
+        return new RatingStore();
+    }
+
+    @Bean
+    EntryBook entryBook() {
+        return new EntryBook();
+    }
+
+    @Bean
+    MatchHistory matchHistory() {
+        return new MatchHistory();
+    }
+
+    @Bean
     Clock clock() {
         return Clock.systemUTC();
     }
