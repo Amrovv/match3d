@@ -73,7 +73,7 @@ class EntryConsumerTest {
     @Test void testPartyQueuedAsOneEntry() {
         UUID id = party(ids(3));
 
-        assertTrue(index.contains(id), "A party is queued under the id intake minted");
+        assertTrue(index.contains(id), "A party is queued under the id intake created");
         assertEquals(1, index.entryCount());
         assertEquals(3, index.playerCount());
     }

@@ -72,7 +72,7 @@ public record Party(UUID id, List<Player> members, Instant queuedAt, int rating)
         return of(UUID.randomUUID(), members, queuedAt);
     }
 
-    /** With an id minted elsewhere, so another service can name the same party. */
+    /** With an id created elsewhere, so another service can name the same party. */
     public static Party of(UUID id, List<Player> members, Instant queuedAt) {
         return new Party(id, members, queuedAt, ratingOf(members));
     }

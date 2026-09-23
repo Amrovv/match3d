@@ -6,17 +6,97 @@ Only built work appears here. New sections go at the top as they land, so the mo
 
 ## Contents
 
-1. [Parties and teams](#parties-and-teams)
-2. [Matching under contention](#matching-under-contention)
-3. [Forming a lobby](#forming-a-lobby)
-4. [The consent check](#the-consent-check)
-5. [The skill index](#the-skill-index)
-6. [Fairness and the widening window](#fairness-and-the-widening-window)
-7. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
-8. [The domain model](#the-domain-model)
-9. [Cost of each operation](#cost-of-each-operation)
-10. [Verification](#verification)
-11. [The build and the pipeline](#the-build-and-the-pipeline)
+1. [Two services over a queue](#two-services-over-a-queue)
+2. [Parties and teams](#parties-and-teams)
+3. [Matching under contention](#matching-under-contention)
+4. [Forming a lobby](#forming-a-lobby)
+5. [The consent check](#the-consent-check)
+6. [The skill index](#the-skill-index)
+7. [Fairness and the widening window](#fairness-and-the-widening-window)
+8. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
+9. [The domain model](#the-domain-model)
+10. [Cost of each operation](#cost-of-each-operation)
+11. [Verification](#verification)
+12. [The build and the pipeline](#the-build-and-the-pipeline)
+
+## Two services over a queue
+
+The engine runs inside `matchmaking-service`. Players reach it through `intake-service`. The two share no database and never call each other: everything between them is an event on RabbitMQ.
+
+```mermaid
+sequenceDiagram
+    participant P as Player
+    participant I as intake-service
+    participant Q as RabbitMQ
+    participant M as matchmaking-service
+
+    P->>I: POST /queue/join
+    I->>I: record the entry
+    I->>Q: EntryQueued
+    I-->>P: 202, entry id
+    Q->>M: EntryQueued
+    M->>M: enqueue, wake the runner
+    M->>M: a pass forms a lobby
+    M->>Q: EntryMatched
+    Q->>I: EntryMatched
+    I->>I: record the match, release the entries
+    P->>I: GET /queue/status/{playerId}
+    I-->>P: MATCHED, both teams
+```
+
+### The events
+
+Four events, defined once in `common` and carried as JSON. One queue runs each way, and each message names its event in the type property.
+
+| Event | Direction | Carries |
+|---|---|---|
+| `EntryQueued` | intake to matchmaking | entry id, member ids, queue time |
+| `EntryLeft` | intake to matchmaking | entry id |
+| `EntryRejected` | matchmaking to intake | entry id, and a reason: duplicate, or spread too wide |
+| `EntryMatched` | matchmaking to intake | match id, both teams as entry ids |
+
+No ratings travel. Matchmaking owns them and looks each member up. A member list of one is a solo, whose entry id is their own id. Intake creates a fresh entry id for a party on every join. One queue per direction is what keeps a leave from overtaking the join for the same entry.
+
+`EntryMatched` is one message per lobby rather than one per entry, so intake learns of every entry in a lobby or none of them.
+
+### Intake
+
+Three endpoints.
+
+| Endpoint | Answers |
+|---|---|
+| `POST /queue/join` | 202 and the entry id for one to five distinct member ids. 400 for any other size or a repeated id, 409 if anyone listed is already queued, 503 if the broker is down. |
+| `POST /queue/leave` | 202 once the leave is published. 404 if nothing is queued under that entry id, 503 if the broker is down, in which case the entry stays queued. |
+| `GET /queue/status/{playerId}` | One of four states, checked in this order: queued with the entry id, matched with the match id and both teams, refused with the reason, or not queued. |
+
+`QueueRegistry` holds who is queued, entry by entry and player by player, and checks and records a join as one step under one lock. That is where a double click, or a player joining solo and in a party at once, is refused: the engine only refuses a repeated entry id, not a repeated person.
+
+A join records the entry, then publishes, and removes the record again if the publish fails. A leave publishes, then forgets. Either way intake changes its own records only once matchmaking can know.
+
+`ResultListener` consumes what comes back. A lobby is expanded from entry ids into players through the registry, recorded on `MatchBoard` for status, and its entries released so those players can queue again. A refusal for a party's spread is recorded against its members on `RejectionBoard` and the entry released. A refusal as a duplicate is a redelivered join intake already holds, and is ignored.
+
+### Matchmaking
+
+`EntryConsumer` reads joins and leaves on one listener thread, so events for an entry are handled in the order intake sent them. A join becomes a `Player` or a `Party`, with each member's rating taken from `RatingStore`, where anyone not yet seen starts at 2500, the middle of the scale. Building a party checks its spread, and a party over the cap is refused. Otherwise the entry goes to `MatchMaker.enqueue`, which refuses a duplicate, and the runner is woken. A leave calls `MatchMaker.withdraw`.
+
+`MatchRunner` is one thread. It runs passes until one comes back empty, then waits for the next join or one second, whichever is first. The timeout is there because windows widen with time alone, so a lobby can become possible without anything arriving. While fewer than ten players are queued no pass runs at all, which `SkillIndex.playerCount` answers in constant time.
+
+A lobby holds players, but intake names entries, so `EntryBook` maps each queued player back to their entry. When a lobby forms, the runner records it in `MatchHistory` by player id, translates each team into entry ids, with a party's five members collapsing into its one id, and publishes `EntryMatched`.
+
+| Endpoint | Answers |
+|---|---|
+| `GET /matches/{id}` | The match, both teams as player ids and when it formed, or 404. |
+| `GET /players/{id}/history` | Every match the player was in, newest first, empty for a player never matched. |
+
+Ratings, the book and the history are in memory.
+
+### Joins and leaves while passes run
+
+`enqueue` and `withdraw` take the engine's commit lock, so a join or leave never lands halfway through a verify. A withdraw removes the entry from the index, the heap and the cooldown queue. Leaving it cooling would hand the player back as an anchor ten seconds after they left.
+
+The anchor of a running pass is the hard case. It was claimed out of the index and the heap at poll, so a leave arriving mid walk finds it in none of the three structures. `MatchMaker` therefore keeps two sets under its lock: anchors in flight, filled at poll and cleared when the pass settles, and anchors withdrawn, filled only when a leave names an anchor in flight. Every verify checks the second set first, and a withdrawn anchor is dropped: not seated, not cooled, not put back.
+
+A solo who leaves and rejoins while their anchor is still in flight rejoins under the same id. The rejoin clears the mark, and the pass carries on with them as though they had never left.
 
 ## Parties and teams
 
@@ -28,7 +108,7 @@ Not because there is more work. A party is one entry, so every draw, consent che
 
 **Filling becomes fitting.** With solos, any ten players who all consent make a lobby. With parties, entries have sizes and cannot be split, so the job is packing them into two teams of exactly five. Three parties of three and a solo all consent and fill ten seats, and still make no lobby, since nothing adds up to five. A walk that seats greedily and never backtracks can also get stuck at nine with one seat only a solo can take, and a queue left holding only threes and fours never forms a lobby at all.
 
-**A group needs one rating.** The index, the heap and the consent check all work on one number, so a party has to be squashed into one, and every choice is wrong for someone. The plain mean of a 1000 and a 3500 is 2250, so the 3500 plays opponents far below them and the 1000 plays opponents far above. The highest member instead punishes every ordinary party that happens to have one stronger friend. The mean is shifted halfway toward the strongest, putting that pair at 2875 while an ordinary party barely moves. Whatever the choice, the engine now sees one derived number, so the rule capping the gap between members has to be checked where parties are formed and trusted after.
+**A group needs one rating.** The index, the heap and the consent check all work on one number, so a party has to be squashed into one, and every choice is wrong for someone. The plain mean of a 1000 and a 3500 is 2250, so the 3500 plays opponents far below them and the 1000 plays opponents far above. The highest member instead punishes every ordinary party that happens to have one stronger friend. The mean is shifted halfway toward the strongest, putting that pair at 2875 while an ordinary party barely moves. Whatever the choice, the engine now sees one derived number, so the rule capping the gap between members is checked when the party is built from its members' ratings, in `matchmaking-service`, and trusted after.
 
 ### A party is one queue entry
 
@@ -36,7 +116,7 @@ The queue does not hold people, it holds entries. `QueueEntry` is a sealed inter
 
 | | `Player` | `Party` |
 |---|---|---|
-| id | the player's | a fresh random one per party |
+| id | the player's | created by intake, fresh per join |
 | rating | the player's | derived from the members, below |
 | queue time | when they joined | when the party joined, shared by all |
 | size | 1 | 2 to 5 |
@@ -350,12 +430,12 @@ Immutable records throughout.
 
 ## Cost of each operation
 
-Four counts, kept apart. `n_r` is the number of occupied ratings, bounded at 5000. `n_b` is the number of players in one bucket. `b` is the number of buckets in a query window. `n_p` is the number of queued players, which appears in the heap costs only and never in an index query.
+Five counts, kept apart. `n_r` is the number of occupied ratings, bounded at 5000. `n_b` is the number of players in one bucket. `b` is the number of buckets in a query window. `n_p` is the number of queued players, which appears in the heap costs only and never in an index query. `n_c` is the number of anchors cooling.
 
 | Operation | Cost |
 |---|---|
 | `SkillIndex.insert`, `SkillIndex.remove` | O(log n_r + log n_b) |
-| `SkillIndex.contains` | O(1) |
+| `SkillIndex.contains`, `playerCount` | O(1) |
 | `SkillIndex.entriesInRange`, seeding the merge | O(log n_r + b) |
 | `WaitTimeMerge`, per player drawn | O(log b) |
 | `FairnessHeap.insert`, `poll`, `remove` | O(log n_p) |
@@ -365,12 +445,14 @@ Four counts, kept apart. `n_r` is the number of occupied ratings, bounded at 500
 | `SkillIndex.contains`, verifying one recruit | O(1) |
 | Seeding a `Selection`, once per pass | O(log n_r + b) |
 | Resuming one after a lost recruit | O(1) per seat refolded, no re-seed |
+| `MatchMaker.enqueue` | O(log n_r + log n_b + log n_p) |
+| `MatchMaker.withdraw` | O(log n_r + log n_b + log n_p + n_c) |
 
 Derived from the structures, not measured. Every measured figure in this repository comes from `./gradlew :matchmaking-core:benchmark`, so anyone cloning it can reproduce them.
 
 ## Verification
 
-193 tests over the eleven core classes, plus a benchmark that reports rather than asserts. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
+207 tests over the eleven core classes, plus a benchmark that reports rather than asserts. The services add 31 tests in `intake-service`, 14 in `matchmaking-service` and 6 in `common`, all run without a broker by publishing through an interface a test replaces. One more test in `common`, tagged `broker`, sends each event through a live RabbitMQ and back, and runs only on demand with `./gradlew :common:brokerTest`. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
 
 One known gap. `formLobby` reads the selection's members afresh on every retry, because they are a snapshot of the two teams and go stale after a drop. Removing that re-read survives the suite, since reaching a retry needs another worker to take a member mid pass and no test can arrange that on demand. The effect would be wasted retries rather than a wrong lobby.
 
@@ -378,10 +460,16 @@ Two results are worth more than the count. Dropping the id tiebreak was caught b
 
 The concurrent tests read the structures after the workers have stopped rather than trying to catch an interleaving, since the evidence a race leaves is permanent while its timing is not. One exists to keep the harness honest rather than the engine: it fails if a run produces no retries at all, which is what tells a working fix apart from one that was never contended.
 
+Leaves are raced the same way. Four runner threads form lobbies while a fifth withdraws half the queue and rejoins half of those, over 300 rounds. Afterwards, no player whose withdraw succeeded may sit in any lobby, and every rejoined player must be in exactly one place, a lobby or the queue. Removing the check for a withdrawn anchor fails it, and so does removing the rejoin's cancellation. Around 290 leaves per run reach an anchor mid pass, so the case the check guards is exercised rather than assumed.
+
+The concurrent join test in intake needed two thousand rounds of eight threads before an unsynchronised registry failed it every time. One race per run passed against the broken version.
+
 ## The build and the pipeline
 
 One Gradle build over four modules. `matchmaking-core` depends on nothing. `common` holds the types both services share. Both services depend on `common`, and `matchmaking-service` also on `matchmaking-core`. Nothing depends on a service, so the engine compiles and tests with no framework on the classpath.
 
 Java 21 is pinned through the Gradle toolchain rather than assumed from the path, so the build resolves the same compiler locally and in CI. JUnit 5 is wired once at the root and inherited.
 
-CI runs `./gradlew build test` on every push to `main` and every pull request. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
+Both services run on Spring Boot, with Spring AMQP for RabbitMQ. `common` holds the events and the one Jackson mapper both services read and write them through.
+
+CI runs on every push to `main` and every pull request, as one job per module, each running `./gradlew :<module>:build`, so each module reports its own check and one failure does not cancel the others. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
