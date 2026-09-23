@@ -34,6 +34,13 @@ class SkillIndexTest {
         return new Player(id, rating, BASE.plusSeconds(tick++));
     }
 
+    /** A party of the given size, every member at the given rating. */
+    private Party party(int size, int rating) {
+        List<Player> members = new java.util.ArrayList<>();
+        for (int i = 0; i < size; i++) members.add(player(rating));
+        return Party.of(members, BASE.plusSeconds(tick++));
+    }
+
     /** The window flattened back to players, for the cases that only care about members. */
     private List<QueueEntry> range(int low, int high) {
         return index.entriesInRange(low, high).flatMap(Set::stream).toList();
@@ -351,5 +358,45 @@ class SkillIndexTest {
         assertEquals(2, index.ratingCount(), "Ratings 1000 and 2000 are occupied");
         assertEquals(index.entriesInRange(Integer.MIN_VALUE, Integer.MAX_VALUE).flatMap(Set::stream).count(),
                 index.entryCount(), "The counter must not drift from what the buckets actually hold");
+    }
+
+    @Test void testPlayerCountEmpty() {
+        assertEquals(0, index.playerCount(), "An empty index holds no players");
+    }
+
+    @Test void testPlayerCountSolo() {
+        index.insert(player(1000));
+        assertEquals(1, index.playerCount(), "A solo counts as one player");
+    }
+
+    @Test void testPlayerCountParty() {
+        index.insert(player(1000));
+        index.insert(party(3, 1000));
+        assertEquals(4, index.playerCount(), "A party counts every member, not once");
+        assertEquals(2, index.entryCount(), "While still counting as one entry");
+    }
+
+    @Test void testPlayerCountRemoveParty() {
+        Party p = party(3, 1000);
+        index.insert(player(1000));
+        index.insert(p);
+        index.remove(p.id());
+        assertEquals(1, index.playerCount(), "Removing a party subtracts every member");
+    }
+
+    @Test void testPlayerCountRejectedInsertNeg() {
+        Party p = party(3, 1000);
+        index.insert(p);
+        index.insert(p);
+        assertEquals(3, index.playerCount(), "A rejected insert must not change the player count");
+    }
+
+    @Test void testPlayerCountFailedRemoveNeg() {
+        Party p = party(3, 1000);
+        index.insert(p);
+        index.remove(p);
+        index.remove(p);
+        index.remove(UUID.randomUUID());
+        assertEquals(0, index.playerCount(), "A remove of something not queued must not change the player count");
     }
 }
