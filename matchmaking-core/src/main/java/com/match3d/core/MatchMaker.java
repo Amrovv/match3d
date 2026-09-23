@@ -9,6 +9,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 
 /**
  * Forms lobbies, one anchor per call. The heap names the anchor, their wait
@@ -50,11 +53,16 @@ public final class MatchMaker {
     /** Failed anchors, soonest ready first. */
     private final PriorityQueue<Pending> cooling = new PriorityQueue<>(BY_READY_AT);
 
+    /** Anchors between poll and settle, in none of the structures. */
+    private final Set<UUID> inFlight = new HashSet<>();
+
+    /** Anchors in flight whose entry left. Their pass drops them. */
+    private final Set<UUID> withdrawn = new HashSet<>();
+
     private int retries = 0;
     private int contentionCooldowns = 0;
     private int starvationCooldowns = 0;
     private int strandedCooldowns = 0;
-    private int aborts = 0;
 
     private final Duration cooldown;
 
@@ -69,6 +77,43 @@ public final class MatchMaker {
     }
 
     /**
+     * Queues an entry. A rejoin while their anchor is mid pass cancels the
+     * withdrawal, and the pass keeps them. False if already queued or in flight.
+     */
+    public boolean enqueue(QueueEntry entry) {
+        commitLock.lock();
+        try {
+            if (withdrawn.remove(entry.id())) return true;
+            if (inFlight.contains(entry.id()) || !index.insert(entry)) return false;
+            heap.insert(entry);
+            return true;
+        } finally {
+            commitLock.unlock();
+        }
+    }
+
+    /**
+     * Takes an entry out of the engine. An anchor mid pass is only marked, and
+     * its pass drops it. False if the id is nowhere in the engine.
+     */
+    public boolean withdraw(UUID id) {
+        commitLock.lock();
+        try {
+            if (inFlight.contains(id)) {
+                withdrawn.add(id);
+                return true;
+            }
+            // The index holds every queued entry, cooling ones included.
+            if (!index.remove(id)) return false;
+            heap.remove(id);
+            cooling.removeIf(pending -> pending.entry().id().equals(id));
+            return true;
+        } finally {
+            commitLock.unlock();
+        }
+    }
+
+    /**
      * One anchor, and as many attempts as their budget allows. Selection runs
      * outside the lock and is verified under it, so a lobby forms only if all
      * ten are still queued at that moment. A member taken by another worker in
@@ -79,8 +124,11 @@ public final class MatchMaker {
      * since recomputing it from a later, fuller selection would let it grow and
      * the loop would not terminate.
      *
-     * Empty means the anchor could not fill a lobby, spent the budget losing
-     * members, or was itself matched elsewhere.
+     * Empty means the anchor found nobody left in range, was stranded by a
+     * party that fit neither side, or spent the budget losing members. The
+     * anchor itself cannot be lost, since it is claimed out of the index at
+     * poll and the verify never checks it. An anchor withdrawn mid pass is
+     * dropped at the next verify.
      */
     public Optional<Lobby> formLobby(Instant now) {
         QueueEntry anchor;
@@ -101,6 +149,12 @@ public final class MatchMaker {
             while (true) {
                 commitLock.lock();
                 try {
+                    if (withdrawn.contains(anchor.id())) {
+                        release(anchor);
+                        settled = true;
+                        return Optional.empty();
+                    }
+
                     // Re-read rather than hold a reference: the two sides are
                     // the selection's state and this is a snapshot of them.
                     List<QueueEntry> members = selection.members();
@@ -119,11 +173,6 @@ public final class MatchMaker {
                         settled = true;
                         return Optional.of(new Lobby(playersIn(selection.teamA()),
                                                      playersIn(selection.teamB())));
-                    }
-
-                    if (missing.contains(anchor)) {
-                        aborts++;
-                        return Optional.empty();
                     }
 
                     if (budget < 0) {
@@ -148,10 +197,11 @@ public final class MatchMaker {
             if (!settled) {
                 commitLock.lock();
                 try {
-                    index.insert(anchor);
-                    heap.insert(anchor);
-                }
-                finally {
+                    if (!release(anchor)) {
+                        index.insert(anchor);
+                        heap.insert(anchor);
+                    }
+                } finally {
                     commitLock.unlock();
                 }
             }
@@ -164,11 +214,21 @@ public final class MatchMaker {
         QueueEntry anchor = heap.poll();
         if (anchor != null) {
             index.remove(anchor);
+            inFlight.add(anchor.id());
         }
         return anchor;
     }
 
-    /** Under the lock. Members no longer queued, empty if all ten survive. */
+    /** Under the lock. Clears the anchor from inFlight. True if their entry left meanwhile. */
+    private boolean release(QueueEntry anchor) {
+        inFlight.remove(anchor.id());
+        return withdrawn.remove(anchor.id());
+    }
+
+    /**
+     * Under the lock. Seated entries no longer queued, empty if all survive.
+     * Skips the anchor, who was claimed out of the index at poll.
+     */
     private List<QueueEntry> missing(List<QueueEntry> members) {
         List<QueueEntry> missing = new ArrayList<>();
         for (int i = 1; i < members.size(); i++) {
@@ -184,17 +244,17 @@ public final class MatchMaker {
             heap.remove(member.id());
             index.remove(member);
         }
+        // Only the anchor, seated first, is in flight.
+        inFlight.remove(members.get(0).id());
         // A member may be cooling. Left in, drainCooled would hand them back.
         cooling.removeIf(pending -> members.contains(pending.entry()));
     }
 
-    /**
-     * Under the lock. A matched anchor is counted as an abort rather than
-     * cooled, since cooling would return them to the heap.
-     */
+    /** Under the lock. Returns the anchor to the index, starts their cooldown, ends their flight. */
     private void cool(QueueEntry anchor, Instant now) {
         index.insert(anchor);
         cooling.add(new Pending(anchor, now.plus(cooldown)));
+        inFlight.remove(anchor.id());
     }
 
     /**
@@ -383,9 +443,5 @@ public final class MatchMaker {
     /** Short passes where a party that fit the window was turned away for room. */
     int strandedCount() {
         return strandedCooldowns;
-    }
-
-    int abortCount() {
-        return aborts;
     }
 }

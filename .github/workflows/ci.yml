@@ -7,7 +7,13 @@ on:
 
 jobs:
   build:
+    name: build (${{ matrix.module }})
     runs-on: ubuntu-latest
+    strategy:
+      # Every module reports, so one failure cannot hide another.
+      fail-fast: false
+      matrix:
+        module: [common, matchmaking-core, intake-service, matchmaking-service]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,4 +27,4 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build and test
-        run: ./gradlew build test
+        run: ./gradlew :${{ matrix.module }}:build

@@ -8,13 +8,120 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Parties and teams](#parties-and-teams)
-2. [Matching under contention](#matching-under-contention)
-3. [Selecting a lobby](#selecting-a-lobby)
-4. [Fairness and waiting](#fairness-and-waiting)
-5. [Indexing players by skill](#indexing-players-by-skill)
-6. [The domain model](#the-domain-model)
-7. [Repository and build](#repository-and-build)
+1. [Two services over a queue](#two-services-over-a-queue)
+2. [Parties and teams](#parties-and-teams)
+3. [Matching under contention](#matching-under-contention)
+4. [Selecting a lobby](#selecting-a-lobby)
+5. [Fairness and waiting](#fairness-and-waiting)
+6. [Indexing players by skill](#indexing-players-by-skill)
+7. [The domain model](#the-domain-model)
+8. [Repository and build](#repository-and-build)
+
+## Two services over a queue
+
+### Each module is its own CI job
+
+**Options.** One job building everything, one job with a step per module, or a matrix running one job per module.
+
+**Chosen.** A matrix. Each module reports its own check on a pull request, so a broken service cannot hide behind the others passing, and the jobs run independently, so one failure does not cancel the rest.
+
+**Cost.** Setup is repeated per job, and `common` and `matchmaking-core` compile again inside every job that depends on them.
+
+### A rejoin mid pass cancels the withdrawal
+
+**Options.** Refuse the rejoin as a duplicate, give every solo join a fresh entry id, or let the rejoin cancel the pending withdrawal.
+
+**Chosen.** Cancel. A solo's entry id is their own id, so a player who leaves and rejoins while their anchor is mid pass arrives with an id the engine still holds in flight. Refused, intake would read it as a redelivered join and ignore it, and the player would show as queued while held nowhere. Intake refuses a join from anyone already queued, and one queue keeps order, so an id both in flight and withdrawn can only be a rejoin, and one in flight but not withdrawn can only be a redelivery.
+
+**Cost.** The player keeps their original queue time rather than the rejoin's, at most one pass of extra credit. A fresh id per solo join was rejected because `Player.id` has to stay the person, for ratings and for history.
+
+### A leave that reaches an anchor mid pass is marked
+
+**Options.** Let the leave find nothing, or record it for the pass to act on.
+
+**Chosen.** Record it. A claimed anchor is in none of the index, the heap and the cooldown queue, so a leave arriving mid walk finds nothing, and every ending of the pass then keeps the player: the commit seats them, cooling requeues them, and the abnormal exit reinserts them. `MatchMaker` tracks anchors in flight from poll to settle, and a leave for one of them is marked withdrawn. Every verify checks the mark first and drops the anchor. Both sets only ever hold anchors currently in flight, so neither grows. Members other than the anchor need nothing new, since a leave takes them out of the index and the verify already catches them.
+
+**Cost.** Two more sets to keep under the commit lock. No test can place a leave mid walk on demand, so the fix rests on a race test, 300 rounds of four runner threads against a leaving thread, which fails when the mark check is removed.
+
+### Joins and leaves enter the engine under its lock
+
+**Options.** Let the service take the commit lock around its own index and heap writes, or give `MatchMaker` methods that do.
+
+**Chosen.** `enqueue` and `withdraw` on `MatchMaker`. The lock never leaves the engine, which keeps every matching decision there. A withdraw clears the index, the heap and the cooldown queue, since an entry left cooling would return as an anchor ten seconds after the player had gone.
+
+**Cost.** Joins and leaves contend with passes for one lock. Each holds it briefly, and a pass releases it for the walk, so a waiting join gets in between a pass's sections without any priority.
+
+### A lobby is published after the engine commits it
+
+**Options.** Publish `EntryMatched` and then commit, commit and then publish, or write the match durably first and publish from that record.
+
+**Chosen.** Commit, then publish. Publishing first would announce lobbies that the verify can still reject. A durable record needs a database, which the services do not have yet.
+
+**Cost.** If the publish fails or matchmaking dies between the two, the lobby is lost: the engine no longer holds the ten, intake still does, and it refuses their rejoins. A broker outage is enough to cause it. The fix is an outbox in Postgres, written with the match and published from until marked sent.
+
+### One runner thread, woken by a join or a second
+
+**Options.** Run a pass on every join, spin a loop continuously, run on a fixed schedule, or loop and wait for a join or a timeout.
+
+**Chosen.** A loop that runs passes until one comes back empty, then waits for a join or one second. Spinning burns a core on empty passes whenever ten players are too far apart to match. Waking on joins alone misses the case the widening window exists for: time passes, windows grow, a lobby becomes possible, and nothing arrives to notice. At the fastest point on the curve a window widens by about 3.5 rating points a second, so a second's wait misses little. No pass runs while fewer than ten players are queued, which `SkillIndex` now counts.
+
+**Cost.** A lobby made possible by widening alone forms up to a second late. Nothing but the player count gates a pass: deciding whether any ten players can match is what the pass does, so a cheaper check would either turn away real lobbies or cost as much.
+
+### One event per lobby
+
+**Options.** One `EntryMatched` per entry, or one per lobby.
+
+**Chosen.** One per lobby, carrying both teams as entry ids. Per entry, a crash after four of ten publishes leaves six entries that intake holds as queued and the engine no longer does, stuck for good. One message is delivered whole or not at all.
+
+**Cost.** A lobby holds players while intake names entries, so matchmaking translates players back into entries through a map of its own, and intake expands entries back into players from its records.
+
+### Ratings stay in matchmaking
+
+**Options.** Carry each member's rating on the join event, or carry ids only and look ratings up where they live.
+
+**Chosen.** Ids only. Matchmaking will own the rating update, so it owns the ratings, and nothing on the wire can disagree with them. Intake creates the entry id: a party's is fresh per join, and a solo's is their own id, so a player in a lobby is the person.
+
+**Cost.** The party spread cap moved to matchmaking, the only service that can see ratings. A party over the cap is accepted by intake and refused afterwards, so the player learns of it through status rather than from the join.
+
+### Intake changes its own records last
+
+**Options.** On a failed publish, fail the request, or hold the event in memory and retry.
+
+**Chosen.** Fail. A join records the entry and then publishes, removing the record and answering 503 if the broker refuses. A leave publishes first and forgets the entry only once the broker has it, since forgetting first would let the player rejoin while matchmaking still holds the old entry. Under both, intake changes its records only once matchmaking can know. A held event is lost if intake restarts after telling the player they queued, and its queue time would credit time spent waiting inside intake.
+
+**Cost.** While the broker is down nobody can join or leave.
+
+### Intake refuses anyone already queued
+
+**Options.** Leave duplicate detection to the engine, or track who is queued in intake.
+
+**Chosen.** Intake. The engine refuses a repeated entry id, not a repeated person, so a double click, or a player queued solo and in a party at once, is only visible to intake. `QueueRegistry` checks and records under one lock, so two concurrent joins by the same player cannot both pass.
+
+**Cost.** Joining a party while queued solo is refused rather than moving the player across. The registry is in memory while the queue is durable, so joins left in the queue across an intake restart reach the engine as entries intake no longer knows.
+
+### Events in common, as JSON, one queue per direction
+
+**Options.** Define events in each service or once in `common`, serialize them as Java objects or as JSON, and use one queue per event type or one per direction.
+
+**Chosen.** Once in `common`, so a field added on one side only is a compile error rather than a silent null. `common` depends on nothing, so events use plain JDK types. JSON, since RabbitMQ carries bytes, and JSON bytes are readable in its dashboard and not tied to Java. One queue per direction, with the event named in the message's type property, since a leave must never overtake the join for the same entry and separate queues would not keep that order.
+
+**Cost.** The compile time guarantee holds per build. Deployed separately, an old intake can run beside a new matchmaking, so events can only change by adding fields a reader can ignore.
+
+### A failing message is dropped, not requeued
+
+**Options.** Requeue a message whose handler throws, route it to a dead letter queue, or drop it.
+
+**Chosen.** Drop and log. Requeued, a message that always fails loops forever.
+
+**Cost.** The message is gone and only the log records it. A dead letter queue that keeps failures for inspection is not built.
+
+### Spring Boot for both services
+
+**Options.** A minimal web library with the plain RabbitMQ client, or Spring Boot with Spring AMQP.
+
+**Chosen.** Spring Boot. It is what most Java backends run on, and Spring AMQP takes care of connections, listener threads and message delivery that the plain client leaves to the caller. `RabbitTemplate` is safe across threads, so publishing needs no lock of its own.
+
+**Cost.** Much of the request path happens by annotation and auto configuration, so how a request reaches a handler is harder to follow than in a framework used as a library. Startup and images are heavier, which the container stages will pay for.
 
 ## Parties and teams
 
@@ -78,6 +185,8 @@ The shift is computed in floating point even though, at exactly 0.5, integer div
 
 **Cost.** The spread cap is a rule the engine cannot enforce, for the reason above. When parties are formed over the network, the check and the admission of a new member have to be one indivisible step, or two concurrent joins each pass the check alone and together produce a party wider than the cap.
 
+**Reversed.** The cap is checked in `matchmaking-service` rather than where parties are formed. Ratings do not travel on the join event, so intake cannot see them. Matchmaking builds the party from a member list fixed in the event, so no concurrent join can widen it, and the check needs no lock.
+
 ### Membership is frozen while queued
 
 **Options.** Let members join or leave a queued party in place, or require the party to leave the queue, change, and queue again.
@@ -95,6 +204,8 @@ A member leaving, even by disconnecting, dequeues the whole party. It is not req
 **Chosen.** Random. A derived id looks attractive because a membership change would produce a new id automatically. It breaks when membership does not change: the same three people queueing an hour apart get the same id, so a worker holding the old entry would verify against the new one, find it present, and commit a party with an hour old queue time and the wrong radius.
 
 **Cost.** A party's id means nothing outside the engine, so whatever forms parties upstream needs its own handle on one and a way to associate the two.
+
+**Amended.** Intake creates the id, fresh per join, and `Party.of` gained an overload taking it, so both services name a party by one id. The rule is unchanged: the same people queueing twice get two ids.
 
 ### The constructor verifies the stored rating
 
@@ -131,6 +242,10 @@ The two problems with an unsynchronised selection are that it reads live views a
 **Chosen.** Claim. Anchors are the longest waiters and the merge offers those first, so every worker's candidate draw began with the other workers' anchors. Measured over ten rounds at maximum contention, 464 passes were abandoned because the anchor had been recruited elsewhere, and the retry path never executed once.
 
 **Cost.** The compensating action that the members deliberately avoid. An unsettled anchor is in neither structure, so any abnormal exit has to put them back, and a process that dies mid pass loses them until the queue redelivers. Measured throughput is unchanged, so this buys an invariant rather than speed: a queued entry is in exactly one place at any moment.
+
+**Amended.** The counter for passes that lost their anchor, and the test asserting it stayed at zero, were removed. The verify never checks the anchor, since the claim has already taken them out of the index, so the counter could not move and the test could not fail.
+
+**Amended.** Being in neither structure also hid a claimed anchor from a leave. `MatchMaker` now records anchors in flight, and a leave for one is marked for its pass to act on.
 
 ### A retry budget of the seats standing
 
@@ -188,7 +303,7 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Options.** Loop internally until something forms, or return after one attempt.
 
-**Chosen.** One attempt. Every call either seats ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold milestone 2's lock across an unbounded number of attempts.
+**Chosen.** One attempt. Every call either seats ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold the commit lock across an unbounded number of attempts.
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
@@ -233,6 +348,8 @@ The result is that the ordered sequence exists nowhere in memory. It is produced
 The stream is sequential deliberately. Parallel would destroy the ordering the class exists to provide.
 
 **Cost.** Two hazards the type system does not express. The stream is single use, and it draws from live views, so the index must not be mutated mid draw. Both are documented and both have tests.
+
+**Amended.** Since the index became skip lists, mutating it mid draw no longer throws. The hazard is now that an entry drawn may already have left, which the commit verifies.
 
 ## Fairness and waiting
 
@@ -366,7 +483,7 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Options.** Mutable objects updated in place, or immutable records replaced on change.
 
-**Chosen.** Records. Several structures, and soon several threads, hold the same player. A player whose fields change underneath a reader is a data race waiting for milestone 2, and mutating a rating in place would strand the player in the wrong bucket.
+**Chosen.** Records. Several structures, and soon several threads, hold the same player. A player whose fields change underneath a reader is a data race once workers run concurrently, and mutating a rating in place would strand the player in the wrong bucket.
 
 **Cost.** A change means constructing a new player and re inserting them, so the structures are updated rather than the object.
 
@@ -378,7 +495,7 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Options.** The record's generated equality over all three components, or an override on id.
 
-**Chosen.** The override. A player reconstructed on the far side of a message queue at milestone 4 will not carry a bit identical queue time, and removal must still find them.
+**Chosen.** The override. A player reconstructed on the far side of a message queue will not carry a bit identical queue time, and removal must still find them.
 
 **Cost.** Equality disagrees with the record's own components, which surprises a reader expecting generated behaviour. Two players with the same id and different ratings compare equal despite occupying different buckets, which is the hole the missing side index leaves open.
 
@@ -401,6 +518,8 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 **Chosen.** First, against a placeholder test. The branch to pull request to green check loop becomes the working habit, and a review process bolted on afterwards is visible in the commit history.
 
 **Cost.** The pipeline proves very little for the first few commits.
+
+**Amended.** The single build job became one job per module once the services had code.
 
 ### Feature branches and squash merges
 

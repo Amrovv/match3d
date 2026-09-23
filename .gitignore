@@ -13,7 +13,7 @@ build/
 out/
 .vscode/
 
-matchmaking-core/bin/
+bin/
 
 .gitignore
 

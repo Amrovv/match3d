@@ -107,11 +107,11 @@ class MatchingRaceTest {
         }
     }
 
-    // Passes today and is kept deliberately. A pass draws each player from the
-    // index at most once, so a lobby cannot seat the same person twice while
-    // the index holds one entry per player. It becomes reachable at race 5,
-    // where a duplicate join at two ratings leaves two entries for one id, and
-    // this is the assertion that would catch it.
+    // Passes today and is kept deliberately. A pass seats an entry at most
+    // once and the index refuses a second entry for one id, so one lobby
+    // cannot hold one entry twice. What neither guard stops is one person
+    // queued in two entries, alone and in a party, which only intake can
+    // refuse. This is the assertion that would catch it.
 
     @Test void testNoLobbyHoldsThePlayerTwice() throws InterruptedException {
         for (int r = 0; r < ROUNDS; r++) {
@@ -198,12 +198,10 @@ class MatchingRaceTest {
         }
     }
 
-    // Passes today and is kept deliberately. computeIfAbsent in insert and the
-    // null return in remove can interleave, and the TreeMap is structurally
-    // modified by both with nothing guarding it, so an empty bucket surviving
-    // is possible in principle. It has not been observed at this contention
-    // level, and the invariant is worth stating under load rather than only in
-    // SkillIndexTest.
+    // Passes today and is kept deliberately. Every insert and remove runs under
+    // the commit lock, so the two cannot interleave and leave an empty bucket
+    // behind. A mutation added outside the lock would break that, and this is
+    // where it would show under load rather than only in SkillIndexTest.
 
     @Test void testNoBucketSurvivesEmpty() throws InterruptedException {
         for (int r = 0; r < ROUNDS; r++) {
@@ -229,16 +227,6 @@ class MatchingRaceTest {
         assertTrue(retries > 0,
                 "Eight workers on one bucket must collide, so a run with no retry at all"
                         + " means the harness has stopped exercising the race");
-    }
-
-    @Test void testAnAnchorIsNeverTakenByAnotherWorker() throws InterruptedException {
-        // The anchor is claimed out of the index at poll, so no other worker
-        // can see them to recruit them. Before that claim this fired on roughly
-        // three passes in five.
-        for (int r = 0; r < ROUNDS; r++) {
-            assertEquals(0, round().matcher().abortCount(),
-                    "A claimed anchor cannot be recruited, so no pass should abandon one");
-        }
     }
 
     // what the workers survived

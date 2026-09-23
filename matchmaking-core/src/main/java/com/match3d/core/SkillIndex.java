@@ -36,11 +36,15 @@ public final class SkillIndex {
     private final NavigableMap<Integer, Set<QueueEntry>> byRating = new ConcurrentSkipListMap<>();
     private final Map<UUID, QueueEntry> byId = new HashMap<>();
 
+    /** Volatile: read without the caller's lock, written only under it. */
+    private volatile int playerCounter = 0;
+
     /** Adds an entry. False if that id is already queued, at any rating. */
     public boolean insert(QueueEntry entry) {
         if (byId.containsKey(entry.id())) return false;
         byRating.computeIfAbsent(entry.rating(), r -> newBucket()).add(entry);
         byId.put(entry.id(), entry);
+        playerCounter += entry.size();
         return true;
     }
 
@@ -53,6 +57,8 @@ public final class SkillIndex {
             bucket.remove(queued);
             return bucket.isEmpty() ? null : bucket;
         });
+
+        playerCounter -= queued.size();
         return true;
     }
 
@@ -78,8 +84,8 @@ public final class SkillIndex {
      * Buckets between low and high inclusive, by rating, each internally by
      * wait time. Left in buckets so the caller can merge across them.
      *
-     * Lazy, over live views rather than copies, so the caller must finish
-     * drawing before mutating the index.
+     * Lazy, over live views rather than copies. Weakly consistent, so a drawn
+     * entry may already have left and the caller must verify before acting.
      */
     public Stream<Set<QueueEntry>> entriesInRange(int low, int high) {
         return byRating.subMap(low, true, high, true).values().stream()
@@ -94,6 +100,11 @@ public final class SkillIndex {
     /** Occupied ratings. Exposed so tests can prove empty buckets are deleted. */
     public int ratingCount() {
         return byRating.size();
+    }
+
+    /** Total number of players queued. */
+    public int playerCount() {
+        return playerCounter;
     }
 
 }

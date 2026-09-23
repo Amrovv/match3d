@@ -386,7 +386,6 @@ class MatchMakerTest {
         assertEquals(0, matcher.retryCount(), "Nothing was taken, so nothing was retried");
         assertEquals(0, matcher.starvationCount(), "A lobby formed, so no anchor was cooled");
         assertEquals(0, matcher.contentionCount(), "No budget was spent");
-        assertEquals(0, matcher.abortCount(), "The anchor was never at risk");
     }
 
     @Test void testAnAnchorWhoCannotFillALobbyIsCountedAsStarvation() {
@@ -567,5 +566,66 @@ class MatchMakerTest {
                     "Attempt " + attempt + " left the heap at " + heap.size() + ", was " + previous);
             previous = heap.size();
         }
+    }
+
+    // enqueue and withdraw
+
+    /** A player not yet in the engine, queued waitedFor seconds before NOW. */
+    private Player player(int rating, int waitedFor) {
+        return new Player(UUID.randomUUID(), rating, NOW.minusSeconds(waitedFor));
+    }
+
+    @Test void testEnqueueFormsLobby() {
+        for (int i = 0; i < 10; i++) {
+            assertTrue(matcher.enqueue(player(1500, 10 - i)), "A new entry should be queued");
+        }
+        assertTrue(matcher.formLobby(NOW).isPresent(), "Ten enqueued players at one rating form a lobby");
+    }
+
+    @Test void testEnqueueDuplicateNeg() {
+        Player p = player(1500, 1);
+        matcher.enqueue(p);
+
+        assertFalse(matcher.enqueue(p), "The same id cannot be queued twice");
+        assertEquals(1, heap.size(), "A refused enqueue must not reach the heap");
+    }
+
+    @Test void testWithdrawQueuedPos() {
+        List<Player> joined = joinCluster(1500, 10);
+
+        assertTrue(matcher.withdraw(joined.get(5).id()), "A queued entry should be withdrawn");
+        assertFalse(index.contains(joined.get(5).id()), "Withdrawn from the index");
+        assertEquals(9, heap.size(), "Withdrawn from the heap");
+        assertTrue(matcher.formLobby(NOW).isEmpty(), "Nine left cannot form a lobby");
+    }
+
+    @Test void testWithdrawUnknownNeg() {
+        assertFalse(matcher.withdraw(UUID.randomUUID()), "An id never queued cannot be withdrawn");
+    }
+
+    @Test void testWithdrawTwiceNeg() {
+        Player p = join(1500, 1);
+        matcher.withdraw(p.id());
+
+        assertFalse(matcher.withdraw(p.id()), "A second withdraw finds nothing");
+    }
+
+    @Test void testWithdrawCoolingAnchor() {
+        Player lone = join(1500, 100);
+        matcher.formLobby(NOW);
+
+        assertTrue(matcher.withdraw(lone.id()), "A cooling anchor should be withdrawn");
+        joinCluster(1500, 9);
+        Optional<Lobby> lobby = matcher.formLobby(NOW.plus(MatchMaker.COOLDOWN).plusSeconds(1));
+
+        assertTrue(lobby.isEmpty(), "Past the cooldown, the withdrawn anchor must not return to complete a lobby");
+        assertFalse(index.contains(lone.id()), "Nor sit in the index");
+    }
+
+    @Test void testEnqueueAfterWithdrawPos() {
+        Player p = join(1500, 1);
+        matcher.withdraw(p.id());
+
+        assertTrue(matcher.enqueue(p), "Once withdrawn, the same id may queue again");
     }
 }

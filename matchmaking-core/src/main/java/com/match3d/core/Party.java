@@ -69,7 +69,12 @@ public record Party(UUID id, List<Player> members, Instant queuedAt, int rating)
      * party that was queued.
      */
     public static Party of(List<Player> members, Instant queuedAt) {
-        return new Party(UUID.randomUUID(), members, queuedAt, ratingOf(members));
+        return of(UUID.randomUUID(), members, queuedAt);
+    }
+
+    /** With an id created elsewhere, so another service can name the same party. */
+    public static Party of(UUID id, List<Player> members, Instant queuedAt) {
+        return new Party(id, members, queuedAt, ratingOf(members));
     }
 
     /** mean + SHIFT * (max - mean), floored. */
