@@ -57,6 +57,27 @@ class EventJsonTest {
         assertEquals(started, roundTrip(started, MatchmakingStarted.class), "The start time comes back");
     }
 
+    @Test void testEntryAcceptedSurvivesTheTrip() {
+        EntryAccepted accepted = new EntryAccepted(UUID.randomUUID(), 2537);
+
+        assertEquals(accepted, roundTrip(accepted, EntryAccepted.class), "The rating comes back");
+    }
+
+    @Test void testMatchmakingAliveSurvivesTheTrip() {
+        MatchmakingAlive alive = new MatchmakingAlive(AT, List.of(new WaitBand(25, 90.5, 3), new WaitBand(26, 40, 2)));
+        MatchmakingAlive quiet = new MatchmakingAlive(AT, List.of());
+
+        assertEquals(alive, roundTrip(alive, MatchmakingAlive.class), "Every band comes back");
+        assertEquals(quiet, roundTrip(quiet, MatchmakingAlive.class), "And an empty hour");
+    }
+
+    @Test void testRatingsFallInBandsOfAHundred() {
+        assertEquals(25, WaitBand.of(2500));
+        assertEquals(25, WaitBand.of(2599));
+        assertEquals(26, WaitBand.of(2600));
+        assertEquals(50, WaitBand.of(5000));
+    }
+
     @Test void testTheInstantIsWrittenAsReadableText() {
         String json = new String(EventJson.toBytes(new EntryLeft(UUID.randomUUID())), StandardCharsets.UTF_8);
         String queued = new String(EventJson.toBytes(

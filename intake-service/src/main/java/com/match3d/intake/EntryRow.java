@@ -7,7 +7,7 @@ import jakarta.persistence.Table;
 import java.time.Instant;
 import java.util.UUID;
 
-/** One queued entry. Its members point at it from players. */
+/** One queued entry. Its members point at it from players. Written only by native statements. */
 @Entity
 @Table(name = "entries")
 public class EntryRow {
@@ -17,12 +17,13 @@ public class EntryRow {
 
     private Instant queuedAt;
 
-    protected EntryRow() {
-    }
+    private Instant sentAt;
 
-    public EntryRow(UUID id, Instant queuedAt) {
-        this.id = id;
-        this.queuedAt = queuedAt;
+    private Instant acceptedAt;
+
+    private Integer rating;
+
+    protected EntryRow() {
     }
 
     public UUID getId() {
@@ -31,5 +32,18 @@ public class EntryRow {
 
     public Instant getQueuedAt() {
         return queuedAt;
+    }
+
+    public Instant getSentAt() {
+        return sentAt;
+    }
+
+    public Instant getAcceptedAt() {
+        return acceptedAt;
+    }
+
+    /** The rating the engine queued it at. Null until first accepted. */
+    public Integer getRating() {
+        return rating;
     }
 }

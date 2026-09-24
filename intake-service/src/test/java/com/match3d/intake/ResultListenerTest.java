@@ -7,11 +7,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import com.match3d.common.EntryAccepted;
 import com.match3d.common.EntryMatched;
 import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
 import com.match3d.common.EventJson;
+import com.match3d.common.WaitBand;
 import com.match3d.common.MatchEnded;
+import com.match3d.common.MatchmakingAlive;
 import com.match3d.common.MatchmakingStarted;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -109,6 +112,22 @@ class ResultListenerTest extends PostgresTest {
 
         assertEquals(StatusResponse.State.NOT_QUEUED, status(solo).state(), "Routed by type to the store");
         assertEquals(StatusResponse.State.NOT_QUEUED, status(other).state());
+    }
+
+    private void deliver(String type, Object event) {
+        MessageProperties props = new MessageProperties();
+        props.setType(type);
+        listener.onMessage(new Message(EventJson.toBytes(event), props));
+    }
+
+    @Test void testAcceptedAndAliveMessagesGiveAnEstimate() {
+        UUID solo = queueSolo();
+
+        deliver("EntryAccepted", new EntryAccepted(solo, 2500));
+        deliver("MatchmakingAlive", new MatchmakingAlive(NOW, List.of(new WaitBand(25, 42, 1))));
+
+        assertEquals(StatusResponse.Matchmaking.UP, status(solo).matchmaking(), "Routed by type to the store");
+        assertEquals(42L, status(solo).estimatedWaitSeconds());
     }
 
     @Test void testUnknownMessageTypeThrows() {

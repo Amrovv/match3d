@@ -8,6 +8,7 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Starts intake. Spring builds each object returned by a @Bean method once and
@@ -21,8 +22,8 @@ public class IntakeApp {
     }
 
     @Bean
-    IntakeStore intakeStore(EntryRepository entries, PlayerRepository players) {
-        return new IntakeStore(entries, players);
+    IntakeStore intakeStore(EntryRepository entries, PlayerRepository players, JdbcTemplate jdbc, Clock clock) {
+        return new IntakeStore(entries, players, jdbc, clock);
     }
 
     @Bean

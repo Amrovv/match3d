@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import com.match3d.common.EntryAccepted;
 import com.match3d.common.EntryLeft;
 import com.match3d.common.EntryMatched;
 import com.match3d.common.EntryQueued;
@@ -97,7 +98,8 @@ class EntryConsumerTest extends PostgresTest {
 
         assertTrue(index.contains(id), "A solo is queued under their own id");
         assertEquals(1, index.playerCount());
-        assertTrue(publisher.published.isEmpty(), "A successful join sends nothing back");
+        assertEquals(List.of(new EntryAccepted(id, 2500)), publisher.published,
+                "A successful join is confirmed, with the rating it is queued at");
     }
 
     @Test void testPartyQueuedAsOneEntry() {
@@ -112,7 +114,8 @@ class EntryConsumerTest extends PostgresTest {
         UUID id = solo();
         consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
 
-        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.DUPLICATE)), publisher.published);
+        assertEquals(List.of(new EntryAccepted(id, 2500), new EntryRejected(id, EntryRejected.Reason.DUPLICATE)),
+                publisher.published, "Accepted once, then refused as a duplicate");
         assertEquals(1, index.playerCount(), "A duplicate must not queue twice");
     }
 
@@ -244,8 +247,8 @@ class EntryConsumerTest extends PostgresTest {
         ratings.create(id);
         consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
 
-        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.UNKNOWN_PLAYER)), publisher.published,
-                "Only the first join is refused");
+        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.UNKNOWN_PLAYER), new EntryAccepted(id, 2500)),
+                publisher.published, "The first join is refused, the second accepted");
         assertTrue(index.contains(id), "A refusal leaves nothing behind that blocks a retry");
     }
 
@@ -286,7 +289,17 @@ class EntryConsumerTest extends PostgresTest {
 
         runner.runPasses();
 
-        assertTrue(publisher.published.isEmpty(), "One failure ends the round instead of retrying the same lobby");
+        assertTrue(matched().isEmpty(), "One failure ends the round instead of retrying the same lobby");
         assertEquals(20, index.playerCount());
+    }
+
+    @Test void testPartyAcceptedAtItsOwnRating() {
+        List<UUID> members = ids(2);
+        rate(members.get(0), 2000);
+        rate(members.get(1), 3000);
+        UUID id = party(members);
+
+        assertEquals(List.of(new EntryAccepted(id, queued(id).rating())), publisher.published,
+                "A party is confirmed at the rating the engine matches it on");
     }
 }

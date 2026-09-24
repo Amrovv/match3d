@@ -1,5 +1,8 @@
 package com.match3d.intake;
 
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -11,7 +14,9 @@ import java.util.UUID;
 
 import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
+import com.match3d.common.WaitBand;
 
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -20,15 +25,25 @@ import org.springframework.transaction.annotation.Transactional;
  */
 public class IntakeStore {
 
+    /** Three missed heartbeats of ten seconds. */
+    static final Duration DOWN_AFTER = Duration.ofSeconds(30);
+
+    /** Bands either side of a rating's own, so plus or minus 500. */
+    static final int ESTIMATE_BANDS = 5;
+
     /** The entry to publish. resent is true when it was queued already and this is a retry. */
     public record Joined(UUID entryId, Instant queuedAt, boolean resent) { }
 
     private final EntryRepository entries;
     private final PlayerRepository players;
+    private final JdbcTemplate jdbc;
+    private final Clock clock;
 
-    public IntakeStore(EntryRepository entries, PlayerRepository players) {
+    public IntakeStore(EntryRepository entries, PlayerRepository players, JdbcTemplate jdbc, Clock clock) {
         this.entries = entries;
         this.players = players;
+        this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     /**
@@ -47,6 +62,7 @@ public class IntakeStore {
             Set<UUID> existingMembers = new HashSet<>();
             players.findByEntryId(existing).forEach(row -> existingMembers.add(row.getId()));
             if (existingMembers.equals(requested)) {
+                entries.markSent(List.of(existing), clock.instant());
                 return new Joined(existing, entries.findById(existing).orElseThrow().getQueuedAt(), true);
             }
         }
@@ -64,7 +80,12 @@ public class IntakeStore {
     public StatusResponse status(UUID playerId) {
         PlayerRow row = players.findById(playerId).orElse(null);
         if (row == null) return StatusResponse.notQueued();
-        if (row.getEntryId() != null) return StatusResponse.queued(row.getEntryId());
+        if (row.getEntryId() != null) {
+            if (!matchmakingUp()) return StatusResponse.queued(row.getEntryId(), StatusResponse.Matchmaking.DOWN, null);
+            Integer rating = entries.findById(row.getEntryId()).map(EntryRow::getRating).orElse(null);
+            Long estimate = rating == null ? null : estimateWait(rating);
+            return StatusResponse.queued(row.getEntryId(), StatusResponse.Matchmaking.UP, estimate);
+        }
         if (row.getMatchId() != null) return StatusResponse.matched(matchView(row.getMatchId()));
         if (row.getRejection() != null) return StatusResponse.refused(EntryRejected.Reason.valueOf(row.getRejection()));
         return StatusResponse.notQueued();
@@ -80,9 +101,13 @@ public class IntakeStore {
         return new MatchView(matchId, teamA, teamB);
     }
 
-    /** Every queued entry as its join, with its original queue time. Two queries however many entries. */
-    @Transactional(readOnly = true)
-    public List<EntryQueued> queuedEntries() {
+    /**
+     * Every queued entry as its join, with its original queue time, marked
+     * sent and unconfirmed, for a restarted engine. Three statements however
+     * many entries.
+     */
+    @Transactional
+    public List<EntryQueued> requeueAll() {
         Map<UUID, List<UUID>> members = new HashMap<>();
         for (PlayerRow row : players.findByEntryIdIsNotNull()) {
             members.computeIfAbsent(row.getEntryId(), id -> new ArrayList<>()).add(row.getId());
@@ -91,7 +116,44 @@ public class IntakeStore {
         for (EntryRow entry : entries.findAll()) {
             joins.add(new EntryQueued(entry.getId(), members.get(entry.getId()), entry.getQueuedAt()));
         }
+        if (!joins.isEmpty()) entries.markSent(joins.stream().map(EntryQueued::entryId).toList(), clock.instant());
         return joins;
+    }
+
+    /** Matchmaking confirmed the entry, at this rating. Ignored for one intake no longer holds. */
+    @Transactional
+    public void accepted(UUID entryId, int rating) {
+        entries.accept(entryId, rating, clock.instant());
+    }
+
+    /** Stamped with intake's clock, not the sender's, so up or down never depends on the two agreeing. */
+    @Transactional
+    public void heartbeat(List<WaitBand> bands) {
+        jdbc.update("""
+                insert into heartbeat (id, last_seen) values (1, ?)
+                on conflict (id) do update set last_seen = excluded.last_seen""", Timestamp.from(clock.instant()));
+        jdbc.update("delete from wait_bands");
+        jdbc.batchUpdate("insert into wait_bands (band, total_wait_seconds, seats) values (?, ?, ?)", bands,
+                bands.size(), (ps, band) -> {
+                    ps.setInt(1, band.band());
+                    ps.setDouble(2, band.totalWaitSeconds());
+                    ps.setLong(3, band.seats());
+                });
+    }
+
+    /** Up if a heartbeat arrived within the last 30 seconds. Down if none ever has. */
+    public boolean matchmakingUp() {
+        List<Timestamp> seen = jdbc.queryForList("select last_seen from heartbeat where id = 1", Timestamp.class);
+        return !seen.isEmpty() && seen.get(0).toInstant().isAfter(clock.instant().minus(DOWN_AFTER));
+    }
+
+    /** Mean wait over the bands within 500 of this rating, whole seconds. Null with nothing to average. */
+    private Long estimateWait(int rating) {
+        int band = WaitBand.of(rating);
+        return jdbc.queryForObject("""
+                select case when sum(seats) > 0 then round(sum(total_wait_seconds) / sum(seats)) end
+                from wait_bands where band between ? and ?""", Long.class,
+                band - ESTIMATE_BANDS, band + ESTIMATE_BANDS);
     }
 
     public boolean isQueued(UUID entryId) {

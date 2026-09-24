@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.match3d.common.EntryAccepted;
 import com.match3d.common.EntryLeft;
 import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
@@ -75,6 +76,8 @@ public class EntryConsumer {
 
         book.record(queued.entryId(), queued.memberIds());
         if (matcher.enqueue(entry.get())) {
+            // A party is confirmed at the rating the engine matches it on.
+            publisher.publish(new EntryAccepted(queued.entryId(), entry.get().rating()));
             runner.wake();
         } else {
             publisher.publish(new EntryRejected(queued.entryId(), EntryRejected.Reason.DUPLICATE));

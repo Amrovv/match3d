@@ -27,6 +27,6 @@ abstract class PostgresTest {
 
     /** Empties every table. Tests outside the test transaction commit, so they call this when done. */
     void wipe() {
-        jdbc.execute("truncate players, entries");
+        jdbc.execute("truncate players, entries, heartbeat, wait_bands");
     }
 }

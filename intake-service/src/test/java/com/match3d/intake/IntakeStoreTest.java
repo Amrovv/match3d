@@ -12,6 +12,7 @@ import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
 import com.match3d.common.EntryRejected;
+import com.match3d.common.WaitBand;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -173,6 +174,98 @@ class IntakeStoreTest extends PostgresTest {
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
                 "update players set rejection = 'DUPLICATE' where id = ?", player),
                 "Queued and refused together breaks the check");
+    }
+
+    private StatusResponse.Matchmaking matchmaking(UUID player) {
+        return store.status(player).matchmaking();
+    }
+
+    @Test void testDownBeforeAnyHeartbeat() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+
+        assertEquals(StatusResponse.Matchmaking.DOWN, matchmaking(player), "Never heard from matchmaking");
+        assertNull(store.status(player).estimatedWaitSeconds(), "So no estimate is offered");
+    }
+
+    @Test void testUpWithAnEstimateFromNearbyBands() {
+        UUID player = solo();
+        store.accepted(player, 2537);
+        store.heartbeat(List.of(new WaitBand(20, 100, 2), new WaitBand(25, 30, 1), new WaitBand(30, 50, 1)));
+
+        assertEquals(StatusResponse.Matchmaking.UP, matchmaking(player));
+        assertEquals(45L, store.status(player).estimatedWaitSeconds(),
+                "Bands 20 to 30 lie within 500 of band 25: 180 seconds over 4 seats");
+    }
+
+    @Test void testBandsFurtherThanFiveAwayLeftOut() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+        store.heartbeat(List.of(new WaitBand(19, 900, 1), new WaitBand(25, 20, 1), new WaitBand(31, 900, 1)));
+
+        assertEquals(20L, store.status(player).estimatedWaitSeconds(), "Only band 25 is in range");
+    }
+
+    @Test void testUpWithoutAnEstimate() {
+        UUID accepted = solo();
+        store.accepted(accepted, 2500);
+        UUID unconfirmed = solo();
+        store.heartbeat(List.of(new WaitBand(40, 20, 1)));
+
+        assertEquals(StatusResponse.Matchmaking.UP, matchmaking(accepted));
+        assertNull(store.status(accepted).estimatedWaitSeconds(), "Nothing recent near 2500");
+        assertNull(store.status(unconfirmed).estimatedWaitSeconds(), "Not yet accepted, so its rating is unknown");
+    }
+
+    @Test void testEachHeartbeatReplacesTheBands() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+        store.heartbeat(List.of(new WaitBand(25, 90, 1)));
+        store.heartbeat(List.of(new WaitBand(25, 10, 1)));
+
+        assertEquals(10L, store.status(player).estimatedWaitSeconds(), "The latest beat is the estimate");
+    }
+
+    @Test void testDownOnceThreeBeatsAreMissed() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+        store.heartbeat(List.of(new WaitBand(25, 20, 1)));
+        jdbc.update("update heartbeat set last_seen = now() - interval '31 seconds'");
+
+        assertEquals(StatusResponse.Matchmaking.DOWN, matchmaking(player), "31 seconds without a heartbeat");
+        assertNull(store.status(player).estimatedWaitSeconds(), "A stale estimate is not shown");
+    }
+
+    @Test void testUpJustBeforeThirtySeconds() {
+        UUID player = solo();
+        store.heartbeat(List.of());
+        jdbc.update("update heartbeat set last_seen = now() - interval '25 seconds'");
+
+        assertEquals(StatusResponse.Matchmaking.UP, matchmaking(player), "Two beats missed is not yet down");
+    }
+
+    @Test void testAcceptedForAnEntryNoLongerHeldIsIgnored() {
+        assertDoesNotThrow(() -> store.accepted(UUID.randomUUID(), 2500), "It left before the confirmation arrived");
+    }
+
+    @Test void testRequeueAllMarksEveryEntryUnconfirmed() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+
+        store.requeueAll();
+
+        EntryRow row = entries.findById(player).orElseThrow();
+        assertNull(row.getAcceptedAt(), "A restarted engine has not accepted it yet");
+        assertEquals(NOW, row.getQueuedAt(), "Its place in the queue is kept");
+    }
+
+    @Test void testResendMarksTheEntryUnconfirmed() {
+        UUID player = solo();
+        store.accepted(player, 2500);
+
+        store.join(player, List.of(player), NOW.plusSeconds(30));
+
+        assertNull(entries.findById(player).orElseThrow().getAcceptedAt(), "A resent join awaits a new confirmation");
     }
 
     /** Outside the test transaction, so each thread commits on its own connection. */

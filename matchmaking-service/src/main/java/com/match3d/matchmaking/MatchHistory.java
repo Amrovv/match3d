@@ -1,5 +1,6 @@
 package com.match3d.matchmaking;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -8,6 +9,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import com.match3d.common.WaitBand;
 import com.match3d.core.Lobby;
 import com.match3d.core.Player;
 
@@ -40,6 +42,21 @@ public class MatchHistory {
     public void forget(UUID matchId) {
         seats.deleteByMatchId(matchId);
         matches.deleteById(matchId);
+    }
+
+    static final Duration ESTIMATE_WINDOW = Duration.ofHours(1);
+
+    /**
+     * The last hour's waits by rating band, for the heartbeat. Leavers are
+     * never recorded, so these count only players who were matched.
+     */
+    public List<WaitBand> waitBands(Instant now) {
+        List<WaitBand> bands = new ArrayList<>();
+        for (Object[] row : seats.waitBands(now.minus(ESTIMATE_WINDOW))) {
+            bands.add(new WaitBand(((Number) row[0]).intValue(), ((Number) row[1]).doubleValue(),
+                    ((Number) row[2]).longValue()));
+        }
+        return bands;
     }
 
     public Optional<MatchRecord> match(UUID matchId) {

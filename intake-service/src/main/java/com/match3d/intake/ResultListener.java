@@ -3,11 +3,13 @@ package com.match3d.intake;
 import java.io.UncheckedIOException;
 import java.util.List;
 
+import com.match3d.common.EntryAccepted;
 import com.match3d.common.EntryMatched;
 import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
 import com.match3d.common.EventJson;
 import com.match3d.common.MatchEnded;
+import com.match3d.common.MatchmakingAlive;
 import com.match3d.common.MatchmakingStarted;
 import com.match3d.common.Queues;
 
@@ -42,15 +44,21 @@ public class ResultListener {
         byte[] body = message.getBody();
         switch (type) {
             case "EntryMatched" -> onMatched(EventJson.fromBytes(body, EntryMatched.class));
+            case "EntryAccepted" -> onAccepted(EventJson.fromBytes(body, EntryAccepted.class));
             case "EntryRejected" -> onRejected(EventJson.fromBytes(body, EntryRejected.class));
             case "MatchEnded" -> store.ended(EventJson.fromBytes(body, MatchEnded.class).matchId());
             case "MatchmakingStarted" -> onStarted(EventJson.fromBytes(body, MatchmakingStarted.class));
+            case "MatchmakingAlive" -> store.heartbeat(EventJson.fromBytes(body, MatchmakingAlive.class).bands());
             default -> throw new IllegalArgumentException("Unknown event type " + type);
         }
     }
 
     void onMatched(EntryMatched matched) {
         store.matched(matched.matchId(), matched.teamA(), matched.teamB());
+    }
+
+    void onAccepted(EntryAccepted accepted) {
+        store.accepted(accepted.entryId(), accepted.rating());
     }
 
     /** Keeps the reason against the members and frees them, unless the entry is queued already. */
@@ -69,7 +77,7 @@ public class ResultListener {
      * duplicates, which changes nothing.
      */
     void onStarted(MatchmakingStarted started) {
-        List<EntryQueued> joins = store.queuedEntries();
+        List<EntryQueued> joins = store.requeueAll();
         log.info("Matchmaking started at {}, requeuing {} entries", started.startedAt(), joins.size());
         int failed = 0;
         for (EntryQueued join : joins) {
