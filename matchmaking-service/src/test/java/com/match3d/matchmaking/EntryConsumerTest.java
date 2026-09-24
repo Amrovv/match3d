@@ -117,8 +117,8 @@ class EntryConsumerTest extends PostgresTest {
 
     @Test void testSpreadTooWideRejected() {
         List<UUID> members = ids(2);
-        ratings.set(members.get(0), 1);
-        ratings.set(members.get(1), 5000);
+        rate(members.get(0), 1);
+        rate(members.get(1), 5000);
         UUID id = party(members);
 
         assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.SPREAD_TOO_WIDE)), publisher.published);
@@ -207,7 +207,7 @@ class EntryConsumerTest extends PostgresTest {
     @Test void testPartyMembersKeepOwnRatings() {
         List<UUID> members = ids(3);
         Map<UUID, Integer> expected = Map.of(members.get(0), 2000, members.get(1), 2100, members.get(2), 2200);
-        expected.forEach(ratings::set);
+        expected.forEach(this::rate);
         UUID id = party(members);
 
         Map<UUID, Integer> held = queued(id).members().stream()
@@ -221,7 +221,7 @@ class EntryConsumerTest extends PostgresTest {
         for (int i = 0; i < 10; i++) {
             UUID id = UUID.randomUUID();
             ratings.create(id);
-            ratings.set(id, 2500 + i);
+            rate(id, 2500 + i);
             Instant at = NOW.minusSeconds(i);
             consumer.onQueued(new EntryQueued(id, List.of(id), at));
             rating.put(id, 2500 + i);

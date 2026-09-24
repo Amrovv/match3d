@@ -34,9 +34,4 @@ public class RatingStore {
     public boolean create(UUID playerId) {
         return players.insertIfAbsent(playerId, STARTING_RATING) == 1;
     }
-
-    /** Creates the row if missing, overwrites it if not. */
-    public void set(UUID playerId, int rating) {
-        players.save(new PlayerRow(playerId, rating));
-    }
 }

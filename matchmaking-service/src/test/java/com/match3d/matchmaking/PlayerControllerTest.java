@@ -40,7 +40,7 @@ class PlayerControllerTest extends PostgresTest {
     @Test void testExistingConflictsAndKeepsRating() {
         UUID id = UUID.randomUUID();
         create(id);
-        ratings.set(id, 3100);
+        rate(id, 3100);
 
         assertEquals(HttpStatus.CONFLICT, create(id));
         assertEquals(3100, ratings.ratingOf(id).orElseThrow(), "A second create must not reset the rating");

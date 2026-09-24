@@ -50,7 +50,7 @@ class ResultControllerTest extends PostgresTest {
     private Player player(int rating) {
         UUID id = UUID.randomUUID();
         ratings.create(id);
-        ratings.set(id, rating);
+        rate(id, rating);
         return new Player(id, rating, NOW);
     }
 

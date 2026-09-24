@@ -1,5 +1,8 @@
 package com.match3d.matchmaking;
 
+import java.util.UUID;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -19,5 +22,12 @@ abstract class PostgresTest {
 
     static {
         POSTGRES.start();
+    }
+
+    @Autowired private PlayerRepository playerRows;
+
+    /** Writes a rating by hand, creating the row if missing. Only tests do this. */
+    void rate(UUID playerId, int rating) {
+        playerRows.save(new PlayerRow(playerId, rating));
     }
 }
