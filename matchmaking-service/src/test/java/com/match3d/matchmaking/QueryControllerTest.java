@@ -81,9 +81,13 @@ class QueryControllerTest extends PostgresTest {
         Lobby lobby = new Lobby(List.of(player()), List.of(stranger));
         UUID matchId = UUID.randomUUID();
 
-        assertThrows(DataIntegrityViolationException.class, () -> history.record(matchId, NOW, lobby),
-                "A seat without a players row breaks the foreign key");
-        assertFalse(matches.existsById(matchId), "So the match row is rolled back with it");
+        try {
+            assertThrows(DataIntegrityViolationException.class, () -> history.record(matchId, NOW, lobby),
+                    "A seat without a players row breaks the foreign key");
+            assertFalse(matches.existsById(matchId), "So the match row is rolled back with it");
+        } finally {
+            wipe();
+        }
     }
 
     @Test void testHistoryOnlyOwnMatches() {

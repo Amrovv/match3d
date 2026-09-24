@@ -166,6 +166,7 @@ class ResultControllerTest extends PostgresTest {
             }
         } finally {
             pool.shutdownNow();
+            wipe();
         }
     }
 
@@ -190,6 +191,7 @@ class ResultControllerTest extends PostgresTest {
             }
         } finally {
             pool.shutdownNow();
+            wipe();
         }
     }
 }

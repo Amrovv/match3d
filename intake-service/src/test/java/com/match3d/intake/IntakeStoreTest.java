@@ -210,6 +210,7 @@ class IntakeStoreTest extends PostgresTest {
             }
         } finally {
             pool.shutdownNow();
+            wipe();
         }
     }
 
@@ -232,6 +233,7 @@ class IntakeStoreTest extends PostgresTest {
             }
         } finally {
             pool.shutdownNow();
+            wipe();
         }
     }
 

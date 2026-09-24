@@ -76,6 +76,7 @@ class PlayerControllerTest extends PostgresTest {
             }
         } finally {
             pool.shutdownNow();
+            wipe();
         }
     }
 }

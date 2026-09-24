@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
@@ -22,6 +23,13 @@ abstract class PostgresTest {
 
     static {
         POSTGRES.start();
+    }
+
+    @Autowired private JdbcTemplate jdbc;
+
+    /** Empties every table. Tests outside the test transaction commit, so they call this when done. */
+    void wipe() {
+        jdbc.execute("truncate player_matches, matches, players");
     }
 
     @Autowired private PlayerRepository playerRows;
