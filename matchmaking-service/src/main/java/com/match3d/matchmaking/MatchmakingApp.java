@@ -36,8 +36,8 @@ public class MatchmakingApp {
     }
 
     @Bean
-    RatingStore ratingStore() {
-        return new RatingStore();
+    RatingStore ratingStore(PlayerRepository players) {
+        return new RatingStore(players);
     }
 
     @Bean
@@ -46,8 +46,8 @@ public class MatchmakingApp {
     }
 
     @Bean
-    MatchHistory matchHistory() {
-        return new MatchHistory();
+    MatchHistory matchHistory(MatchRepository matches, PlayerMatchRepository seats) {
+        return new MatchHistory(matches, seats);
     }
 
     @Bean

@@ -104,17 +104,13 @@ public class MatchRunner {
      */
     void announce(Lobby lobby) {
         UUID matchId = UUID.randomUUID();
-        history.record(new MatchRecord(matchId, clock.instant(), ids(lobby.teamA()), ids(lobby.teamB())));
+        history.record(matchId, clock.instant(), lobby);
 
         List<UUID> teamA = entries(lobby.teamA());
         List<UUID> teamB = entries(lobby.teamB());
         publisher.publish(new EntryMatched(matchId, teamA, teamB));
         teamA.forEach(book::forget);
         teamB.forEach(book::forget);
-    }
-
-    private static List<UUID> ids(List<Player> players) {
-        return players.stream().map(Player::id).toList();
     }
 
     /** Members of a party share one entry, so each entry appears once. */

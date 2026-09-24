@@ -2,6 +2,8 @@ package com.match3d.matchmaking;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.match3d.common.EntryLeft;
@@ -14,6 +16,8 @@ import com.match3d.core.Party;
 import com.match3d.core.Player;
 import com.match3d.core.QueueEntry;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
@@ -24,6 +28,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class EntryConsumer {
+
+    private static final Logger log = LoggerFactory.getLogger(EntryConsumer.class);
 
     private final MatchMaker matcher;
     private final RatingStore ratings;
@@ -53,7 +59,7 @@ public class EntryConsumer {
 
     /** Recorded before enqueue, so a lobby formed at once can be translated. */
     void onQueued(EntryQueued queued) {
-        QueueEntry entry;
+        Optional<QueueEntry> entry;
         try {
             entry = toEntry(queued);
         } catch (IllegalArgumentException e) {
@@ -61,9 +67,14 @@ public class EntryConsumer {
             publisher.publish(new EntryRejected(queued.entryId(), EntryRejected.Reason.SPREAD_TOO_WIDE));
             return;
         }
+        if (entry.isEmpty()) {
+            log.warn("Refused entry {}: unknown player among {}", queued.entryId(), queued.memberIds());
+            publisher.publish(new EntryRejected(queued.entryId(), EntryRejected.Reason.UNKNOWN_PLAYER));
+            return;
+        }
 
         book.record(queued.entryId(), queued.memberIds());
-        if (matcher.enqueue(entry)) {
+        if (matcher.enqueue(entry.get())) {
             runner.wake();
         } else {
             publisher.publish(new EntryRejected(queued.entryId(), EntryRejected.Reason.DUPLICATE));
@@ -75,15 +86,18 @@ public class EntryConsumer {
         if (matcher.withdraw(left.entryId())) book.forget(left.entryId());
     }
 
-    private QueueEntry toEntry(EntryQueued queued) {
+    /** Empty if any member has no players row. */
+    private Optional<QueueEntry> toEntry(EntryQueued queued) {
         if (queued.memberIds().size() == 1) {
             UUID id = queued.entryId();
-            return new Player(id, ratings.ratingOf(id), queued.queuedAt());
+            return ratings.ratingOf(id).<QueueEntry>map(rating -> new Player(id, rating, queued.queuedAt()));
         }
+        Map<UUID, Integer> rated = ratings.ratingOf(queued.memberIds());
+        if (rated.size() < queued.memberIds().size()) return Optional.empty();
         List<Player> members = new ArrayList<>();
         for (UUID id : queued.memberIds()) {
-            members.add(new Player(id, ratings.ratingOf(id), queued.queuedAt()));
+            members.add(new Player(id, rated.get(id), queued.queuedAt()));
         }
-        return Party.of(queued.entryId(), members, queued.queuedAt());
+        return Optional.of(Party.of(queued.entryId(), members, queued.queuedAt()));
     }
 }

@@ -7,6 +7,9 @@ plugins {
 
 // Start it with ./gradlew :matchmaking-service:bootRun
 
+// 1.21.0, the Boot 3.5.0 default, cannot talk to Docker Engine 29.
+extra["testcontainers.version"] = "1.21.4"
+
 dependencies {
     implementation(project(":common"))
     implementation(project(":matchmaking-core"))

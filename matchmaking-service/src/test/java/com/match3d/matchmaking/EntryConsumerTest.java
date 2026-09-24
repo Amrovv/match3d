@@ -3,8 +3,13 @@ package com.match3d.matchmaking;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import com.match3d.common.EntryLeft;
@@ -13,32 +18,47 @@ import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
 import com.match3d.core.FairnessHeap;
 import com.match3d.core.MatchMaker;
+import com.match3d.core.Player;
+import com.match3d.core.QueueEntry;
 import com.match3d.core.SkillIndex;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The consumer and runner wired to a real engine, called directly, no broker
- * and no runner thread. Passes run only when a test calls runPasses.
+ * The consumer and runner wired to a real engine and Postgres, called
+ * directly, no broker and no runner thread. Passes run only when a test calls
+ * runPasses. The engine is built per test; the stores are Spring's.
  */
-class EntryConsumerTest {
+class EntryConsumerTest extends PostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-09-23T12:00:00Z");
 
     private final SkillIndex index = new SkillIndex();
     private final MatchMaker matcher = new MatchMaker(index, new FairnessHeap());
-    private final RatingStore ratings = new RatingStore();
     private final EntryBook book = new EntryBook();
-    private final MatchHistory history = new MatchHistory();
     private final FakePublisher publisher = new FakePublisher();
-    private final MatchRunner runner = new MatchRunner(matcher, index, book, history, publisher,
-                                                       Clock.fixed(NOW, ZoneOffset.UTC));
-    private final EntryConsumer consumer = new EntryConsumer(matcher, ratings, book, publisher, runner);
+
+    @Autowired private RatingStore ratings;
+    @Autowired private MatchHistory history;
+    @Autowired private PlayerMatchRepository seats;
+
+    private MatchRunner runner;
+    private EntryConsumer consumer;
+
+    @BeforeEach void wire() {
+        runner = new MatchRunner(matcher, index, book, history, publisher, Clock.fixed(NOW, ZoneOffset.UTC));
+        consumer = new EntryConsumer(matcher, ratings, book, publisher, runner);
+    }
 
     private UUID solo() {
         UUID id = UUID.randomUUID();
+        ratings.create(id);
         consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
         return id;
     }
@@ -53,8 +73,17 @@ class EntryConsumerTest {
         return id;
     }
 
-    private static List<UUID> ids(int count) {
-        return Stream.generate(UUID::randomUUID).limit(count).toList();
+    /** Players with a players row, as matchmaking requires. */
+    private List<UUID> ids(int count) {
+        List<UUID> ids = Stream.generate(UUID::randomUUID).limit(count).toList();
+        ids.forEach(ratings::create);
+        return ids;
+    }
+
+    /** The entry the engine holds under this id. */
+    private QueueEntry queued(UUID id) {
+        return index.entriesInRange(1, 5000).flatMap(Set::stream)
+                .filter(e -> e.id().equals(id)).findFirst().orElseThrow();
     }
 
     private List<EntryMatched> matched() {
@@ -154,5 +183,75 @@ class EntryConsumerTest {
 
         assertTrue(matched().isEmpty());
         assertEquals(9, index.playerCount(), "Below ten no pass runs, so no anchor is cooled");
+    }
+
+    @Test void testUnknownSoloRejected() {
+        UUID id = UUID.randomUUID();
+        consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
+
+        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.UNKNOWN_PLAYER)), publisher.published);
+        assertFalse(index.contains(id), "An unknown player is never queued");
+        assertNull(book.entryOf(id), "Nor recorded");
+    }
+
+    @Test void testPartyWithUnknownMemberRejected() {
+        List<UUID> members = new ArrayList<>(ids(2));
+        members.add(UUID.randomUUID());
+        UUID id = party(members);
+
+        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.UNKNOWN_PLAYER)), publisher.published);
+        assertFalse(index.contains(id), "One unknown member refuses the whole party");
+        assertNull(book.entryOf(members.get(0)), "Known members are not recorded either");
+    }
+
+    @Test void testPartyMembersKeepOwnRatings() {
+        List<UUID> members = ids(3);
+        Map<UUID, Integer> expected = Map.of(members.get(0), 2000, members.get(1), 2100, members.get(2), 2200);
+        expected.forEach(ratings::set);
+        UUID id = party(members);
+
+        Map<UUID, Integer> held = queued(id).members().stream()
+                .collect(Collectors.toMap(Player::id, Player::rating));
+        assertEquals(expected, held, "Each member is queued at their own stored rating");
+    }
+
+    @Test void testSeatsStoreWhatEngineUsed() {
+        Map<UUID, Integer> rating = new HashMap<>();
+        Map<UUID, Instant> queuedAt = new HashMap<>();
+        for (int i = 0; i < 10; i++) {
+            UUID id = UUID.randomUUID();
+            ratings.create(id);
+            ratings.set(id, 2500 + i);
+            Instant at = NOW.minusSeconds(i);
+            consumer.onQueued(new EntryQueued(id, List.of(id), at));
+            rating.put(id, 2500 + i);
+            queuedAt.put(id, at);
+        }
+        runner.runPasses();
+
+        List<PlayerMatchRow> rows = seats.findByKeyMatchIdIn(List.of(matched().get(0).matchId()));
+        assertEquals(10, rows.size());
+        for (PlayerMatchRow row : rows) {
+            assertEquals(rating.get(row.getPlayerId()), row.getRatingBefore(), "Rating before is the queued rating");
+            assertEquals(queuedAt.get(row.getPlayerId()), row.getQueuedAt(), "Queued at is the join time");
+        }
+    }
+
+    @Test void testRefusedThenRegisteredAccepted() {
+        UUID id = UUID.randomUUID();
+        consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
+        ratings.create(id);
+        consumer.onQueued(new EntryQueued(id, List.of(id), NOW));
+
+        assertEquals(List.of(new EntryRejected(id, EntryRejected.Reason.UNKNOWN_PLAYER)), publisher.published,
+                "Only the first join is refused");
+        assertTrue(index.contains(id), "A refusal leaves nothing behind that blocks a retry");
+    }
+
+    @Test void testUnknownEventTypeThrows() {
+        MessageProperties props = new MessageProperties();
+        props.setType("EntryTeleported");
+
+        assertThrows(IllegalArgumentException.class, () -> consumer.onMessage(new Message(new byte[0], props)));
     }
 }
