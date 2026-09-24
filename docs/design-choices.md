@@ -8,14 +8,129 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Two services over a queue](#two-services-over-a-queue)
-2. [Parties and teams](#parties-and-teams)
-3. [Matching under contention](#matching-under-contention)
-4. [Selecting a lobby](#selecting-a-lobby)
-5. [Fairness and waiting](#fairness-and-waiting)
-6. [Indexing players by skill](#indexing-players-by-skill)
-7. [The domain model](#the-domain-model)
-8. [Repository and build](#repository-and-build)
+1. [Persistence and recovery](#persistence-and-recovery)
+2. [Two services over a queue](#two-services-over-a-queue)
+3. [Parties and teams](#parties-and-teams)
+4. [Matching under contention](#matching-under-contention)
+5. [Selecting a lobby](#selecting-a-lobby)
+6. [Fairness and waiting](#fairness-and-waiting)
+7. [Indexing players by skill](#indexing-players-by-skill)
+8. [The domain model](#the-domain-model)
+9. [Repository and build](#repository-and-build)
+
+## Persistence and recovery
+
+### Estimates travel in the heartbeat
+
+**Options.** Estimate each entry once when the engine accepts it and store the number in intake, ask matchmaking at status time, or send current waits by rating band on every heartbeat and estimate in intake.
+
+**Chosen.** The heartbeat. Every ten seconds `MatchmakingAlive` carries the last hour's waits, grouped into bands of 100 by the rating each seat had when it waited, as a total and a count per band so bands combine exactly. `EntryAccepted` carries the rating the engine queued the entry at, a party's derived rating included, and intake averages the bands within five of it at status time. The estimate refreshes every ten seconds, and matchmaking runs one grouped query per beat instead of one per join, so its cost no longer grows with traffic. Asking at status time was rejected because it is a direct call between the services, and it makes every status poll load the one service that cannot scale out.
+
+**Cost.** Bands make plus or minus 500 approximate at its edges, a 2537 player averaging 2000 to 3099. Intake keeps each entry's rating and the latest bands, two pieces of matchmaking's data it would otherwise not hold. The estimate counts matched players only, since leavers are never recorded.
+
+### Matchmaking is down after three missed heartbeats
+
+**Options.** Infer matchmaking's health from unanswered entries, call it on every status, or listen for a heartbeat on the queue.
+
+**Chosen.** A heartbeat. Matchmaking sends `MatchmakingAlive` every ten seconds, and intake records when it arrived by its own clock, never the sender's, so the two machines' clocks never have to agree. Thirty seconds without one, three beats, and a queued player's status reads down with no estimate. Unanswered entries were rejected as a signal because silence may also mean the broker is down or matchmaking is behind.
+
+**Cost.** A real outage shows up to 30 seconds late, and one slow beat after another can show down briefly while all is well. A first start reads down until the first beat arrives.
+
+### Unconfirmed entries are sent again
+
+**Options.** Rely on the player retrying their join, or have intake find entries matchmaking never confirmed.
+
+**Chosen.** Find them. A sweeper runs every ten seconds on every intake copy and sends again any entry unconfirmed 30 seconds after it was last sent, with its original queue time. That closes the gap where a copy commits a join and dies before publishing it. The 30 seconds count from `sent_at` rather than `queued_at`, or a restart's requeue, whose queue times are old, would be sent again at once.
+
+**Cost.** A lost join waits up to about 40 seconds. Several copies may send the same entry, and a broker outage makes every entry look unconfirmed, both harmless since the engine refuses a duplicate.
+
+### Every entry is confirmed
+
+**Options.** Treat silence after a join as success, or have matchmaking confirm every entry it accepts.
+
+**Chosen.** Confirm. `EntryAccepted` joins `EntryRejected`, `EntryMatched`, `MatchEnded` and `MatchmakingStarted`, so every change to an entry is stated by a message rather than inferred from one not arriving. It is what lets intake tell an entry in the engine from one that never reached it.
+
+**Cost.** One more message per join. A leave is still not confirmed, which is safe: if the entry was matched first, the `EntryMatched` still arrives and intake skips the player it no longer holds.
+
+### A failed publish returns the lobby to the engine
+
+**Options.** Log the failure and keep the match, return the entries and keep the match row, or return the entries and delete the match.
+
+**Chosen.** Undo it. If `EntryMatched` cannot be published, the match and its seats are deleted in one transaction and each entry goes back into the engine through `enqueue`, a party rebuilt whole under its entry id, with its original queue time. The round of passes stops there, or it would form the same lobby again at once and spin while the broker is down.
+
+**Cost.** A lobby waits for the next round, a second later, once the broker is back. A crash between saving the match and publishing it leaves a match that is never resulted, in both players' history; the restart requeue matches them again.
+
+### A restart of matchmaking requeues everything intake holds
+
+**Options.** A durable outbox in matchmaking's database, or intake sending every queued entry again when matchmaking restarts.
+
+**Chosen.** Requeue from intake. The engine is memory only, so a restart loses everyone in it and any lobby formed but not yet published. Intake already holds who is queued, so when `MatchmakingStarted` arrives one intake copy sends every entry again with its original queue time, keeping each player's place and widened window. It travels on the queue `EntryMatched` uses, so a lobby published before the restart is seen first and its players are not requeued. An outbox was rejected because intake's database already is that record.
+
+**Cost.** Status reads queued throughout. A leave landing during the requeue can leave an entry in the engine that intake has forgotten.
+
+### Intake keeps its state in its own database
+
+**Options.** Keep intake's records in memory, share matchmaking's database, or give intake a database of its own.
+
+**Chosen.** Its own. Queued, matched and refused players live in intake's Postgres, so any number of intake copies serve any player and one dying hands its players to the rest without touching the engine. A player is in at most one state, so one `players` table carries an entry, a match and side, or a refusal, and a check constraint refuses a row with two. `IntakeStore` replaces `QueueRegistry`, `MatchBoard` and `RejectionBoard`, one transactional method per event, because a match must release an entry and record the match in one transaction.
+
+**Cost.** Every request is a database round trip, and intake needs Postgres to start.
+
+### A repeated join with the same members is sent again
+
+**Options.** Refuse any join from someone already queued, or send the existing entry again when the members match.
+
+**Chosen.** Send again, for the same member set only. A client that lost its reply retries, and the retry republishes the entry it already made, with its original id and queue time, so a copy that died between commit and publish cannot strand the player. Any other overlap is refused as before.
+
+**Cost.** A retry and a fresh join are indistinguishable by design, so a player cannot restart their queue time by joining again.
+
+### Concurrent writes are settled by one statement
+
+**Options.** Read, decide in Java and write, or lock rows first, or make each check and its write one SQL statement.
+
+**Chosen.** One statement. A join claims each member with `update ... where entry_id is null`, a solo's entry with `insert ... on conflict do nothing`, a result with `update matches ... where winner is null`, a rating change with `rating = rating + :delta`, and registration with `on conflict do nothing`. Postgres locks the row while it writes, so the second of two racers sees the first's result instead of a stale read. A party's members are claimed in id order, so two joins sharing members in opposite orders cannot deadlock.
+
+**Cost.** Native SQL for every such write, outside JPA's entity tracking, so each carries `clearAutomatically` to keep loaded entities from going stale. Each race has a test of many rounds on separate connections, run outside the test transaction.
+
+### A result is reported or tossed, and moves ratings by 100
+
+**Options.** An Elo update from both teams' ratings, or a flat change, and a random winner or one reported by the caller.
+
+**Chosen.** Flat, reported. `POST /matches/{id}/result` takes a winner from the caller, standing in for a game server, and tosses a coin without one. Every winner gains 100 and every loser loses 100, held to 1 to 5000. The result, the end time and all ten ratings commit together, and publishing `MatchEnded` waits for the commit so intake is never told of a result that rolled back.
+
+**Cost.** Ratings measure wins, not strength against the opponent. A lost `MatchEnded` leaves players reading matched until they queue again, with ratings already moved.
+
+### Players are created outside matchmaking
+
+**Options.** Create a player at 2500 the first time they are seen, or require an account first.
+
+**Chosen.** Require one. Accounts belong to a system this project stands in for, so a player exists before they queue, and a join naming anyone unknown is refused as `UNKNOWN_PLAYER`. `POST /players` creates one at 2500 under the caller's own id, and a seed of twenty is loaded for local runs only, through the `local` profile.
+
+**Cost.** A refused party is not told which member was unknown. The seed is a repeatable migration outside the default folder, so Flyway is told a missing repeatable migration is expected.
+
+### Tests run against a real Postgres
+
+**Options.** Mock the repositories, use an in memory database, or start Postgres per test run.
+
+**Chosen.** Real Postgres through Testcontainers, one container per test run shared by every class, with the real migrations. Native SQL, `on conflict`, check constraints, foreign keys and row locking are Postgres behaviour a mock or another database would not reproduce. Each test runs in a transaction rolled back at its end, and tests that must commit, the races, empty the tables when done.
+
+**Cost.** Docker is needed to test either service, and a run starts a container. Testcontainers is pinned to 1.21.4, since the version Spring Boot chose cannot talk to Docker Engine 29.
+
+### Spring Data JPA with Flyway
+
+**Options.** Hand written SQL through JDBC, or Spring Data JPA, and schemas created by Hibernate or by versioned migrations.
+
+**Chosen.** JPA for reads and plain rows, migrations with Flyway. Entities hold ids as plain columns rather than associations, so no query is ever loaded lazily behind the caller's back. Hibernate only validates the schema against the entities; Flyway owns it.
+
+**Cost.** Two ways of writing to the database, repository methods and native statements, and a reader has to know which is which.
+
+### Seats keep the rating and queue time at the match
+
+**Options.** Keep only each player's current rating, or snapshot it on every seat.
+
+**Chosen.** Snapshot. `player_matches` holds one row per player per match with side, rating before and queued at, because `players.rating` is overwritten by every result and queue time analytics need what each player had when they waited. Queue time is formed at minus queued at, so no separate table of queue events is kept. `matches.formed_at` is indexed for the last hour's waits, and `player_matches.player_id` for history, since the primary key leads with the match.
+
+**Cost.** Leavers are never recorded, so every wait figure describes players who were matched.
 
 ## Two services over a queue
 
@@ -59,6 +174,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Cost.** If the publish fails or matchmaking dies between the two, the lobby is lost: the engine no longer holds the ten, intake still does, and it refuses their rejoins. A broker outage is enough to cause it. The fix is an outbox in Postgres, written with the match and published from until marked sent.
 
+**Amended.** A failed publish no longer loses the lobby: the match is deleted and its entries go back into the engine, and a matchmaking restart requeues everything intake holds, so the outbox was not built. What remains is a crash between saving the match and publishing it, which leaves a match that is never resulted.
+
 ### One runner thread, woken by a join or a second
 
 **Options.** Run a pass on every join, spin a loop continuously, run on a fixed schedule, or loop and wait for a join or a timeout.
@@ -83,6 +200,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Cost.** The party spread cap moved to matchmaking, the only service that can see ratings. A party over the cap is accepted by intake and refused afterwards, so the player learns of it through status rather than from the join.
 
+**Amended.** Ratings now live in matchmaking's database, and a player with no row is refused as unknown instead of starting at 2500. `EntryAccepted` carries an entry's rating back to intake for the wait estimate; intake still never sends one.
+
 ### Intake changes its own records last
 
 **Options.** On a failed publish, fail the request, or hold the event in memory and retry.
@@ -91,6 +210,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Cost.** While the broker is down nobody can join or leave.
 
+**Amended.** Intake's records are now rows in its own database, and the order is unchanged. A join committed but never published is sent again by a retry of the same join, or by the sweeper once 30 seconds pass unconfirmed.
+
 ### Intake refuses anyone already queued
 
 **Options.** Leave duplicate detection to the engine, or track who is queued in intake.
@@ -98,6 +219,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 **Chosen.** Intake. The engine refuses a repeated entry id, not a repeated person, so a double click, or a player queued solo and in a party at once, is only visible to intake. `QueueRegistry` checks and records under one lock, so two concurrent joins by the same player cannot both pass.
 
 **Cost.** Joining a party while queued solo is refused rather than moving the player across. The registry is in memory while the queue is durable, so joins left in the queue across an intake restart reach the engine as entries intake no longer knows.
+
+**Amended.** `QueueRegistry` is gone. The check is a conditional update on each member's row in intake's database, which holds across every intake copy where the lock held within one process. A join naming exactly the members of an existing entry now sends that entry again instead of being refused. Intake's records survive a restart, so queued joins no longer reach the engine as entries intake has forgotten.
 
 ### Events in common, as JSON, one queue per direction
 

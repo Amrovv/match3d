@@ -6,22 +6,109 @@ Only built work appears here. New sections go at the top as they land, so the mo
 
 ## Contents
 
-1. [Two services over a queue](#two-services-over-a-queue)
-2. [Parties and teams](#parties-and-teams)
-3. [Matching under contention](#matching-under-contention)
-4. [Forming a lobby](#forming-a-lobby)
-5. [The consent check](#the-consent-check)
-6. [The skill index](#the-skill-index)
-7. [Fairness and the widening window](#fairness-and-the-widening-window)
-8. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
-9. [The domain model](#the-domain-model)
-10. [Cost of each operation](#cost-of-each-operation)
-11. [Verification](#verification)
-12. [The build and the pipeline](#the-build-and-the-pipeline)
+1. [Persistence and recovery](#persistence-and-recovery)
+2. [Two services over a queue](#two-services-over-a-queue)
+3. [Parties and teams](#parties-and-teams)
+4. [Matching under contention](#matching-under-contention)
+5. [Forming a lobby](#forming-a-lobby)
+6. [The consent check](#the-consent-check)
+7. [The skill index](#the-skill-index)
+8. [Fairness and the widening window](#fairness-and-the-widening-window)
+9. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
+10. [The domain model](#the-domain-model)
+11. [Cost of each operation](#cost-of-each-operation)
+12. [Verification](#verification)
+13. [The build and the pipeline](#the-build-and-the-pipeline)
+
+## Persistence and recovery
+
+Each service has a Postgres database of its own, and neither reads the other's. Schemas are Flyway migrations, and Hibernate only checks the entities against them. Everything that must hold when two writers race is one SQL statement, so Postgres settles the race by locking the row rather than Java reading and then writing.
+
+### Matchmaking's database
+
+| Table | Holds |
+|---|---|
+| `players` | Each player's current rating, overwritten by every result. |
+| `matches` | When a match formed, and once it has a result, the winning side and when it ended. Indexed on `formed_at`. |
+| `player_matches` | One row per player per match: side, the rating they had and when they queued. Indexed on `player_id`, since the key leads with the match. |
+
+A player exists before they queue. Accounts belong to a system this project stands in for, so `POST /players` creates one at 2500 under the caller's own id, answering 409 if it exists, and running with the `local` profile loads twenty seeded players with ids ending 001 to 020. A join naming anyone with no row is refused as `UNKNOWN_PLAYER`, which also keeps every seat's foreign key satisfied.
+
+A formed match is written as its row and ten seats in one transaction, before `EntryMatched` is published. History reads cost three queries however long the history: the player's match ids, those matches newest first, and every seat of all of them at once, grouped into teams in Java.
+
+### Results and ratings
+
+`POST /matches/{id}/result` takes `{"winner": "A"}` or `"B"`, standing in for a game server, and tosses a coin with no body. One transaction sets the winner only if none is set yet, then moves every winner up 100 and every loser down 100, held to 1 to 5000, in two statements Postgres computes itself.
+
+```mermaid
+sequenceDiagram
+    participant G as Caller
+    participant M as matchmaking-service
+    participant D as matchmaking database
+    participant Q as RabbitMQ
+    participant I as intake-service
+
+    G->>M: POST /matches/{id}/result
+    M->>D: set winner where none is set
+    M->>D: winners +100, losers -100, held to 1 to 5000
+    D-->>M: commit
+    M->>Q: MatchEnded
+    M-->>G: 200, the winner
+    Q->>I: MatchEnded
+    I->>I: clear the match from its players
+```
+
+A second result gets 409 and moves nothing, because the first statement finds a winner already set and the rest never runs. Two results racing for one match end the same way, and two results for different matches sharing a player both count, since each adds to the rating Postgres holds at that moment. `MatchEnded` is published only after the commit.
+
+### Intake's database
+
+| Table | Holds |
+|---|---|
+| `entries` | Each queued entry: when it queued, when intake last sent it, when matchmaking confirmed it, and the rating it was queued at. |
+| `players` | Each player's one state: queued under an entry, matched with a match and side, or refused with a reason. A check constraint refuses a row with two. |
+| `heartbeat` | One row: when matchmaking's last heartbeat arrived, by intake's clock. |
+| `wait_bands` | The latest heartbeat's waits by rating band. |
+
+`IntakeStore` has one transactional method per event. A join claims each member with an update that succeeds only if they are not already queued, in id order so two joins sharing members cannot deadlock, and throws if any claim fails so the whole join rolls back. A join from exactly the members of an existing entry sends that entry again, with its original id and queue time. Queued to matched, and queued to refused, are each one update, so no row is ever briefly in both states. Nothing is held in memory, so any number of intake copies serve any player.
+
+### Failures and how each recovers
+
+| What fails | What happens | What recovers it |
+|---|---|---|
+| An intake copy, before its join commits | The transaction rolls back. | The player retries. |
+| An intake copy, after committing a join and before publishing it | Intake says queued, the engine never heard. | The player's retry, or the sweeper within about 40 seconds. |
+| The broker, when matchmaking publishes a lobby | The publish throws. | The match is deleted and its entries go back into the engine with their queue times. |
+| Matchmaking, at any point | The engine's memory is gone. | On restart it sends `MatchmakingStarted`, and intake sends every entry it holds again. |
+| Matchmaking, between saving a match and publishing it | A match row nobody was told of. | Nothing. The players are requeued and matched again, and the old match is never resulted. |
+| Matchmaking, while it stays down | No heartbeats. | Status reads down after 30 seconds. |
+
+`MatchmakingStarted` shares the queue with `EntryMatched`, so a lobby published before a restart reaches intake first and its players are not requeued. RabbitMQ gives each message to one consumer, so one intake copy performs the requeue.
+
+The sweeper runs every ten seconds on every intake copy and sends again any entry sent over 30 seconds ago that matchmaking never confirmed. Counting from the last send rather than the queue time keeps a restart's requeue, whose queue times are old, from being sent twice at once.
+
+### The heartbeat and the wait estimate
+
+Every ten seconds matchmaking sends `MatchmakingAlive`, carrying the last hour's waits grouped by the rating each seat had, in bands of 100, as a total and a count per band. Intake stamps the arrival with its own clock and replaces its bands. A queued player's status then reads:
+
+```json
+{"state": "QUEUED", "entryId": "...", "matchmaking": "UP", "estimatedWaitSeconds": 45}
+```
+
+The estimate averages the bands within five of the entry's own, which is roughly plus or minus 500 rating. Shortened to three bands, for an entry queued at 2537, in band 25:
+
+| Band | Ratings | Total wait | Seats |
+|---|---|---|---|
+| 20 | 2000 to 2099 | 100 s | 2 |
+| 25 | 2500 to 2599 | 30 s | 1 |
+| 30 | 3000 to 3099 | 50 s | 1 |
+
+Bands 20 to 30 are in range, so the estimate is 180 seconds over 4 seats, 45. A band of 19 or 31 would be left out. Totals and counts are sent rather than averages because averages of bands cannot be combined without their counts.
+
+With no heartbeat for 30 seconds, or none ever, status reads `"matchmaking": "DOWN"` and gives no estimate. An entry not yet confirmed, or with no recent seats in range, reads up with the estimate left out.
 
 ## Two services over a queue
 
-The engine runs inside `matchmaking-service`. Players reach it through `intake-service`. The two share no database and never call each other: everything between them is an event on RabbitMQ.
+The engine runs inside `matchmaking-service`. Players reach it through `intake-service`. Each has its own database, and they never call each other: everything between them is an event on RabbitMQ.
 
 ```mermaid
 sequenceDiagram
@@ -36,26 +123,32 @@ sequenceDiagram
     I-->>P: 202, entry id
     Q->>M: EntryQueued
     M->>M: enqueue, wake the runner
+    M->>Q: EntryAccepted, at its rating
+    Q->>I: EntryAccepted
     M->>M: a pass forms a lobby
     M->>Q: EntryMatched
     Q->>I: EntryMatched
-    I->>I: record the match, release the entries
+    I->>I: move its players from queued to matched
     P->>I: GET /queue/status/{playerId}
     I-->>P: MATCHED, both teams
 ```
 
 ### The events
 
-Four events, defined once in `common` and carried as JSON. One queue runs each way, and each message names its event in the type property.
+Eight events, defined once in `common` and carried as JSON. One queue runs each way, and each message names its event in the type property.
 
 | Event | Direction | Carries |
 |---|---|---|
 | `EntryQueued` | intake to matchmaking | entry id, member ids, queue time |
 | `EntryLeft` | intake to matchmaking | entry id |
-| `EntryRejected` | matchmaking to intake | entry id, and a reason: duplicate, or spread too wide |
+| `EntryAccepted` | matchmaking to intake | entry id, and the rating the engine queued it at |
+| `EntryRejected` | matchmaking to intake | entry id, and a reason: duplicate, spread too wide, or unknown player |
 | `EntryMatched` | matchmaking to intake | match id, both teams as entry ids |
+| `MatchEnded` | matchmaking to intake | match id |
+| `MatchmakingStarted` | matchmaking to intake | when it started, so intake sends every entry again |
+| `MatchmakingAlive` | matchmaking to intake, every ten seconds | when it was sent, and the last hour's waits by rating band |
 
-No ratings travel. Matchmaking owns them and looks each member up. A member list of one is a solo, whose entry id is their own id. Intake creates a fresh entry id for a party on every join. One queue per direction is what keeps a leave from overtaking the join for the same entry.
+Every change to an entry is stated by a message rather than inferred from one not arriving. Only a leave is unconfirmed. No ratings travel toward matchmaking, which owns them and looks each member up. A member list of one is a solo, whose entry id is their own id. Intake creates a fresh entry id for a party on every join. One queue per direction is what keeps a leave from overtaking the join for the same entry.
 
 `EntryMatched` is one message per lobby rather than one per entry, so intake learns of every entry in a lobby or none of them.
 
@@ -65,30 +158,32 @@ Three endpoints.
 
 | Endpoint | Answers |
 |---|---|
-| `POST /queue/join` | 202 and the entry id for one to five distinct member ids. 400 for any other size or a repeated id, 409 if anyone listed is already queued, 503 if the broker is down. |
+| `POST /queue/join` | 202 and the entry id for one to five distinct member ids. The same members again get their existing entry, sent again. 400 for any other size or a repeated id, 409 if anyone listed is queued in another entry, 503 if the broker is down. |
 | `POST /queue/leave` | 202 once the leave is published. 404 if nothing is queued under that entry id, 503 if the broker is down, in which case the entry stays queued. |
-| `GET /queue/status/{playerId}` | One of four states, checked in this order: queued with the entry id, matched with the match id and both teams, refused with the reason, or not queued. |
+| `GET /queue/status/{playerId}` | One of four states: queued with the entry id, whether matchmaking is up, and the estimated wait when known; matched with the match id and both teams; refused with the reason; or not queued. |
 
-`QueueRegistry` holds who is queued, entry by entry and player by player, and checks and records a join as one step under one lock. That is where a double click, or a player joining solo and in a party at once, is refused: the engine only refuses a repeated entry id, not a repeated person.
+`IntakeStore` holds every player's state in intake's database, described under persistence. A double click, or a player joining solo and in a party at once, is refused there: the engine only refuses a repeated entry id, not a repeated person.
 
-A join records the entry, then publishes, and removes the record again if the publish fails. A leave publishes, then forgets. Either way intake changes its own records only once matchmaking can know.
+A join records the entry, then publishes, and forgets it again if the publish fails, unless it was an entry sent again, which predates the request. A leave publishes, then forgets. Either way intake changes its own records only once matchmaking can know.
 
-`ResultListener` consumes what comes back. A lobby is expanded from entry ids into players through the registry, recorded on `MatchBoard` for status, and its entries released so those players can queue again. A refusal for a party's spread is recorded against its members on `RejectionBoard` and the entry released. A refusal as a duplicate is a redelivered join intake already holds, and is ignored.
+`ResultListener` consumes what comes back, and each event is one call on the store. A lobby moves its entries' players to matched. A refusal for a party's spread or an unknown player records the reason against the members and drops the entry. A refusal as a duplicate is a redelivered or resent join intake already holds, and is ignored.
 
 ### Matchmaking
 
-`EntryConsumer` reads joins and leaves on one listener thread, so events for an entry are handled in the order intake sent them. A join becomes a `Player` or a `Party`, with each member's rating taken from `RatingStore`, where anyone not yet seen starts at 2500, the middle of the scale. Building a party checks its spread, and a party over the cap is refused. Otherwise the entry goes to `MatchMaker.enqueue`, which refuses a duplicate, and the runner is woken. A leave calls `MatchMaker.withdraw`.
+`EntryConsumer` reads joins and leaves on one listener thread, so events for an entry are handled in the order intake sent them. A join becomes a `Player` or a `Party`, with ratings read from `RatingStore`, a party's in one query. Anyone with no row is refused as unknown, and building a party checks its spread, refusing a party over the cap. Otherwise the entry goes to `MatchMaker.enqueue`, which refuses a duplicate, `EntryAccepted` goes back with the entry's rating, and the runner is woken. A leave calls `MatchMaker.withdraw`.
 
 `MatchRunner` is one thread. It runs passes until one comes back empty, then waits for the next join or one second, whichever is first. The timeout is there because windows widen with time alone, so a lobby can become possible without anything arriving. While fewer than ten players are queued no pass runs at all, which `SkillIndex.playerCount` answers in constant time.
 
-A lobby holds players, but intake names entries, so `EntryBook` maps each queued player back to their entry. When a lobby forms, the runner records it in `MatchHistory` by player id, translates each team into entry ids, with a party's five members collapsing into its one id, and publishes `EntryMatched`.
+A lobby holds players, but intake names entries, so `EntryBook` maps each queued player back to their entry. When a lobby forms, the runner records it in `MatchHistory`, translates each team into entry ids, with a party's five members collapsing into its one id, and publishes `EntryMatched`. If the publish fails, the match is deleted, the entries go back into the engine, and the round stops.
 
 | Endpoint | Answers |
 |---|---|
+| `POST /players` | 201 for a new id at 2500, 409 if it exists, 400 with no id. |
 | `GET /matches/{id}` | The match, both teams as player ids and when it formed, or 404. |
 | `GET /players/{id}/history` | Every match the player was in, newest first, empty for a player never matched. |
+| `POST /matches/{id}/result` | 200 and the winner, from the body or a coin toss. 400 for a winner other than A or B, 404 for an unknown match, 409 if it already has a result. |
 
-Ratings, the book and the history are in memory.
+The engine and the book are in memory, and a restart rebuilds both from intake's requeue.
 
 ### Joins and leaves while passes run
 
@@ -452,7 +547,7 @@ Derived from the structures, not measured. Every measured figure in this reposit
 
 ## Verification
 
-207 tests over the eleven core classes, plus a benchmark that reports rather than asserts. The services add 31 tests in `intake-service`, 14 in `matchmaking-service` and 6 in `common`, all run without a broker by publishing through an interface a test replaces. One more test in `common`, tagged `broker`, sends each event through a live RabbitMQ and back, and runs only on demand with `./gradlew :common:brokerTest`. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
+207 tests over the eleven core classes, plus a benchmark that reports rather than asserts. The services add 60 tests in `intake-service`, 47 in `matchmaking-service` and 11 in `common`. Both services test against a real Postgres started through Testcontainers, with the real migrations, one container shared by every test class, and without a broker, by publishing through an interface a test replaces. Each test runs in a transaction rolled back at its end, and the tests that must commit, the races, empty the tables when done. One more test in `common`, tagged `broker`, sends each event through a live RabbitMQ and back, and runs only on demand with `./gradlew :common:brokerTest`. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
 
 One known gap. `formLobby` reads the selection's members afresh on every retry, because they are a snapshot of the two teams and go stale after a drop. Removing that re-read survives the suite, since reaching a retry needs another worker to take a member mid pass and no test can arrange that on demand. The effect would be wasted retries rather than a wrong lobby.
 
@@ -462,7 +557,9 @@ The concurrent tests read the structures after the workers have stopped rather t
 
 Leaves are raced the same way. Four runner threads form lobbies while a fifth withdraws half the queue and rejoins half of those, over 300 rounds. Afterwards, no player whose withdraw succeeded may sit in any lobby, and every rejoined player must be in exactly one place, a lobby or the queue. Removing the check for a withdrawn anchor fails it, and so does removing the rejoin's cancellation. Around 290 leaves per run reach an anchor mid pass, so the case the check guards is exercised rather than assumed.
 
-The concurrent join test in intake needed two thousand rounds of eight threads before an unsynchronised registry failed it every time. One race per run passed against the broken version.
+The database races are tested on separate connections, outside the test transaction, over many rounds: eight joins sharing one player admit exactly one and the losers leave no entry behind; two parties listing shared members in opposite orders never deadlock; eight results racing for one match move ratings once; one player in two matches ended together gains both wins; eight registrations of one id create it once. Each was checked against the bug it exists for. Dropping the claim's `entry_id is null` guard queues a player twice, claiming members unsorted deadlocks, dropping the result's `winner is null` guard double counts, and replacing the rating statement with a read and a write in Java loses a win. Returning a failed lobby to the engine was checked by skipping the return, and stopping the round after a failed publish by letting the round continue, which the test makes fail by letting only the first publish fail rather than letting the round spin.
+
+Both services were also run together against a real Postgres and RabbitMQ: a party and eight solos matched into one lobby that both services report alike, a result moving the five winners to 2600 and the losers to 2400, the estimate appearing once a match existed, an unknown player refused, status reading down within 30 seconds of stopping matchmaking, and a waiting entry requeued when it restarted.
 
 ## The build and the pipeline
 
@@ -470,6 +567,6 @@ One Gradle build over four modules. `matchmaking-core` depends on nothing. `comm
 
 Java 21 is pinned through the Gradle toolchain rather than assumed from the path, so the build resolves the same compiler locally and in CI. JUnit 5 is wired once at the root and inherited.
 
-Both services run on Spring Boot, with Spring AMQP for RabbitMQ. `common` holds the events and the one Jackson mapper both services read and write them through.
+Both services run on Spring Boot, with Spring AMQP for RabbitMQ and Spring Data JPA over Postgres, and Flyway migrating each database at startup. `common` holds the events and the one Jackson mapper both services read and write them through. The heartbeat and the sweeper are Spring scheduled tasks.
 
-CI runs on every push to `main` and every pull request, as one job per module, each running `./gradlew :<module>:build`, so each module reports its own check and one failure does not cancel the others. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
+CI runs on every push to `main` and every pull request, as one job per module, each running `./gradlew :<module>:build`, so each module reports its own check and one failure does not cancel the others. The service jobs start their Postgres through Docker on the runner. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
