@@ -34,7 +34,7 @@ class MatchingRaceTest {
                          MatchingWorkerPool.Run run,
                          SkillIndex index, FairnessHeap heap, MatchMaker matcher) {
 
-        /** Every player seated in a lobby, duplicates kept, since duplicates are the point. */
+        /** Every player placed in a lobby, duplicates kept, since duplicates are the point. */
         List<Player> matched() {
             return run.lobbies().stream().flatMap(lobby -> lobby.members().stream()).toList();
         }
@@ -102,12 +102,12 @@ class MatchingRaceTest {
             Set<UUID> seen = new HashSet<>();
             for (Player player : round.matched()) {
                 assertTrue(seen.add(player.id()),
-                        "A player seated in one lobby cannot also be seated in another");
+                        "A player placed in one lobby cannot also be placed in another");
             }
         }
     }
 
-    // Passes today and is kept deliberately. A pass seats an entry at most
+    // Passes today and is kept deliberately. A pass places an entry at most
     // once and the index refuses a second entry for one id, so one lobby
     // cannot hold one entry twice. What neither guard stops is one person
     // queued in two entries, alone and in a party, which only intake can
@@ -121,7 +121,7 @@ class MatchingRaceTest {
                 Set<UUID> ids = new HashSet<>();
                 lobby.members().forEach(member -> ids.add(member.id()));
                 assertEquals(lobby.members().size(), ids.size(),
-                        "A lobby seats ten distinct players");
+                        "A lobby holds ten distinct players");
             }
         }
     }
@@ -133,21 +133,21 @@ class MatchingRaceTest {
             // Each team of each lobby gets its own number, so one set per
             // entry says how many sides its members were spread across.
             Map<QueueEntry, Set<Integer>> sidesOf = new HashMap<>();
-            Map<QueueEntry, Integer> seatedOf = new HashMap<>();
+            Map<QueueEntry, Integer> placedOf = new HashMap<>();
             int side = 0;
             for (Lobby lobby : round.run().lobbies()) {
                 for (List<Player> team : List.of(lobby.teamA(), lobby.teamB())) {
                     for (Player player : team) {
                         QueueEntry entry = round.entryOf().get(player.id());
                         sidesOf.computeIfAbsent(entry, e -> new HashSet<>()).add(side);
-                        seatedOf.merge(entry, 1, Integer::sum);
+                        placedOf.merge(entry, 1, Integer::sum);
                     }
                     side++;
                 }
             }
 
-            seatedOf.forEach((entry, seated) -> {
-                assertEquals(entry.size(), seated, "A party is seated whole or not at all");
+            placedOf.forEach((entry, placed) -> {
+                assertEquals(entry.size(), placed, "A party is placed whole or not at all");
                 assertEquals(1, sidesOf.get(entry).size(), "A party sits on one team of one lobby");
             });
         }
@@ -161,7 +161,7 @@ class MatchingRaceTest {
 
             int playersQueued = round.queued().stream().mapToInt(QueueEntry::size).sum();
             assertEquals(PLAYERS, round.matched().size() + playersQueued,
-                    "Every player joined is either seated in a lobby or still queued");
+                    "Every player joined is either placed in a lobby or still queued");
         }
     }
 
@@ -172,7 +172,7 @@ class MatchingRaceTest {
             for (Player player : round.matched()) {
                 QueueEntry entry = round.entryOf().get(player.id());
                 assertFalse(round.heap().contains(entry.id()),
-                        "A player already seated in a lobby must not be waiting to anchor another");
+                        "A player already placed in a lobby must not be waiting to anchor another");
             }
         }
     }

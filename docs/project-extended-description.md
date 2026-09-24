@@ -189,7 +189,7 @@ The engine and the book are in memory, and a restart rebuilds both from intake's
 
 `enqueue` and `withdraw` take the engine's commit lock, so a join or leave never lands halfway through a verify. A withdraw removes the entry from the index, the heap and the cooldown queue. Leaving it cooling would hand the player back as an anchor ten seconds after they left.
 
-The anchor of a running pass is the hard case. It was claimed out of the index and the heap at poll, so a leave arriving mid walk finds it in none of the three structures. `MatchMaker` therefore keeps two sets under its lock: anchors in flight, filled at poll and cleared when the pass settles, and anchors withdrawn, filled only when a leave names an anchor in flight. Every verify checks the second set first, and a withdrawn anchor is dropped: not seated, not cooled, not put back.
+The anchor of a running pass is the hard case. It was claimed out of the index and the heap at poll, so a leave arriving mid walk finds it in none of the three structures. `MatchMaker` therefore keeps two sets under its lock: anchors in flight, filled at poll and cleared when the pass settles, and anchors withdrawn, filled only when a leave names an anchor in flight. Every verify checks the second set first, and a withdrawn anchor is dropped: not placed, not cooled, not put back.
 
 A solo who leaves and rejoins while their anchor is still in flight rejoins under the same id. The rejoin clears the mark, and the pass carries on with them as though they had never left.
 
@@ -201,7 +201,7 @@ Friends can queue together as a party of two to five. A party always lands in th
 
 Not because there is more work. A party is one entry, so every draw, consent check, verify and removal touches it once, the same as a solo, and lobbies form faster with parties than without. Parties add two problems that solo matching never has.
 
-**Filling becomes fitting.** With solos, any ten players who all consent make a lobby. With parties, entries have sizes and cannot be split, so the job is packing them into two teams of exactly five. Three parties of three and a solo all consent and fill ten seats, and still make no lobby, since nothing adds up to five. A walk that seats greedily and never backtracks can also get stuck at nine with one seat only a solo can take, and a queue left holding only threes and fours never forms a lobby at all.
+**Filling becomes fitting.** With solos, any ten players who all consent make a lobby. With parties, entries have sizes and cannot be split, so the job is packing them into two teams of exactly five. Three parties of three and a solo all consent and fill ten slots, and still make no lobby, since nothing adds up to five. A walk that places greedily and never backtracks can also get stuck at nine with one slot only a solo can take, and a queue left holding only threes and fours never forms a lobby at all.
 
 **A group needs one rating.** The index, the heap and the consent check all work on one number, so a party has to be squashed into one, and every choice is wrong for someone. The plain mean of a 1000 and a 3500 is 2250, so the 3500 plays opponents far below them and the 1000 plays opponents far above. The highest member instead punishes every ordinary party that happens to have one stronger friend. The mean is shifted halfway toward the strongest, putting that pair at 2875 while an ordinary party barely moves. Whatever the choice, the engine now sees one derived number, so the rule capping the gap between members is checked when the party is built from its members' ratings, in `matchmaking-service`, and trusted after.
 
@@ -217,7 +217,7 @@ The queue does not hold people, it holds entries. `QueueEntry` is a sealed inter
 | size | 1 | 2 to 5 |
 | members | themselves | the people in it |
 
-Because a party has one rating and one queue time, the index files it in one bucket, the heap orders it in one position, and the consent check tests it as one rating with one radius. None of the three know parties exist. The matcher does not branch on which kind of entry it holds either: it asks every entry for its size when counting seats, and for its members when building the lobby, and a player answers 1 and itself.
+Because a party has one rating and one queue time, the index files it in one bucket, the heap orders it in one position, and the consent check tests it as one rating with one radius. None of the three know parties exist. The matcher does not branch on which kind of entry it holds either: it asks every entry for its size when counting slots, and for its members when building the lobby, and a player answers 1 and itself.
 
 That is also what keeps a party whole. The walk offers candidates one entry at a time, so it can take a party or skip it but never take part of one.
 
@@ -242,7 +242,7 @@ A party is checked when it is built: two to five members, no two more than 2500 
 
 ### Filling two teams
 
-`Selection` holds two lists, team A and team B, and the anchor starts on team A. For each candidate the walk offers, it runs the consent check and looks for the first team with room for the whole entry, A before B. If neither has room, the candidate is skipped, and the walk notes whether they would have consented. If one does and consent holds, the candidate is seated on that team. The walk stops when all ten seats are filled or the window runs out.
+`Selection` holds two lists, team A and team B, and the anchor starts on team A. For each candidate the walk offers, it runs the consent check and looks for the first team with room for the whole entry, A before B. If neither has room, the candidate is skipped, and the walk notes whether they would have consented. If one does and consent holds, the candidate is placed on that team. The walk stops when all ten slots are filled or the window runs out.
 
 Shortened to the teams only, with every candidate assumed to pass consent. The anchor is a solo.
 
@@ -256,30 +256,30 @@ Shortened to the teams only, with every candidate assumed to pass consent. The a
 
 The skipped three stack is not lost. It stays queued, untouched, for another pass.
 
-Why teams during the walk rather than ten seats split afterwards: three parties of three and a solo fill ten seats, and no combination of them makes five. Filling sides directly means every lobby that forms can actually be played.
+Why teams during the walk rather than ten slots split afterwards: three parties of three and a solo fill ten slots, and no combination of them makes five. Filling sides directly means every lobby that forms can actually be played.
 
-The walk never undoes a seat, so it can get stuck. A solo anchor and a four stack fill team A, a second four stack puts team B at four, and only a solo can take the last seat. If the window has none, the pass fails with nine players seated, the anchor cools, and they return later with a wider radius. A pass that fails having skipped a candidate who would have consented is counted as stranded rather than starved, so a lobby lost to party sizes and a window with nobody in range stay distinguishable.
+The walk never undoes a placement, so it can get stuck. A solo anchor and a four stack fill team A, a second four stack puts team B at four, and only a solo can take the last slot. If the window has none, the pass fails with nine players placed, the anchor cools, and they return later with a wider radius. A pass that fails having skipped a candidate who would have consented is counted as stranded rather than starved, so a lobby lost to party sizes and a window with nobody in range stay distinguishable.
 
-Everything under contention works on entries. The verify checks each seated entry is still queued, the commit removes entries, and the retry budget counts seats, so losing a five stack costs a pass five seats rather than one. `Lobby` is built last, by unpacking each team's entries into their players, so a lobby holds `teamA` and `teamB` as lists of people with the anchor first on team A.
+Everything under contention works on entries. The verify checks each placed entry is still queued, the commit removes entries, and the retry budget counts slots, so losing a five stack costs a pass five slots rather than one. `Lobby` is built last, by unpacking each team's entries into their players, so a lobby holds `teamA` and `teamB` as lists of people with the anchor first on team A.
 
 ### Testing parties under contention
 
-The race test runs eight workers against one tight cluster and reads the structures after they stop. Half of each round's people are in parties, with sizes cycling two, three, four, five, and each party followed by as many solos. Solos matter: a queue of only four stacks forms nothing, because each side ends up one seat short with nobody small enough to fill it. The order is fixed so any failing round can be run again exactly.
+The race test runs eight workers against one tight cluster and reads the structures after they stop. Half of each round's people are in parties, with sizes cycling two, three, four, five, and each party followed by as many solos. Solos matter: a queue of only four stacks forms nothing, because each side ends up one slot short with nobody small enough to fill it. The order is fixed so any failing round can be run again exactly.
 
-While the population is built, the test records a map from each player's id to the entry they queued in. A solo maps to themselves. That map is what lets a test go from a person seated in a lobby back to the party they came with.
+While the population is built, the test records a map from each player's id to the entry they queued in. A solo maps to themselves. That map is what lets a test go from a person placed in a lobby back to the party they came with.
 
-**The split check.** The invariant is that every party with any member seated has all its members seated, in one lobby, on one team. The test walks the lobbies and gives every team of every lobby its own number: lobby 0 has teams 0 and 1, lobby 1 has teams 2 and 3, and so on. For each seated player it looks up their entry and records two things against that entry: the team number they sat on, into a set, and one more seat, into a count. Then for every entry that appeared, the count must equal the entry's size, so all its members were seated, and the set must hold exactly one team number, so they all sat together.
+**The split check.** The invariant is that every party with any member placed has all its members placed, in one lobby, on one team. The test walks the lobbies and gives every team of every lobby its own number: lobby 0 has teams 0 and 1, lobby 1 has teams 2 and 3, and so on. For each placed player it looks up their entry and records two things against that entry: the team number they sat on, into a set, and one more player, into a count. Then for every entry that appeared, the count must equal the entry's size, so all its members were placed, and the set must hold exactly one team number, so they all sat together.
 
-Both are needed, because each misses something the other catches. The set is built by walking the lobbies, so a member who was never seated leaves no trace in it. Take a three stack X, Y, Z:
+Both are needed, because each misses something the other catches. The set is built by walking the lobbies, so a member who was never placed leaves no trace in it. Take a three stack X, Y, Z:
 
-| Seating | Team set | Count | Team check | Count check |
+| Placement | Team set | Count | Team check | Count check |
 |---|---|---|---|---|
-| X, Y on team 3, Z never seated | {3} | 2 | passes | fails, 2 is not 3 |
+| X, Y on team 3, Z never placed | {3} | 2 | passes | fails, 2 is not 3 |
 | X, Y on team 3, Z on team 4 | {3, 4} | 3 | fails | passes |
 
 The count is the only check that compares against how many people the party should have.
 
-**The accounting checks count in the right units.** Lobbies hold people and the index holds entries, so adding the two directly undercounts: a queued three stack is three people but one entry. The check that nobody was lost now counts people on both sides, summing the size of every entry still queued. The check that no seated player is still waiting in the heap looks up the player's entry and asks the heap about that, since a party member's own id was never in the heap and asking about it would always pass.
+**The accounting checks count in the right units.** Lobbies hold people and the index holds entries, so adding the two directly undercounts: a queued three stack is three people but one entry. The check that nobody was lost now counts people on both sides, summing the size of every entry still queued. The check that no placed player is still waiting in the heap looks up the player's entry and asks the heap about that, since a party member's own id was never in the heap and asking about it would always pass.
 
 ### Parties under load
 
@@ -312,7 +312,7 @@ Several worker threads run the pass against one shared engine. The expensive par
 ```mermaid
 flowchart TD
     poll["Under the lock:<br/>drain cooled, poll the anchor,<br/>claim them out of the index"] --> select
-    select["Outside the lock:<br/>walk the window, seat ten"] --> verify
+    select["Outside the lock:<br/>walk the window, place ten"] --> verify
     verify{"Under the lock:<br/>are the recruits still queued?"}
     verify -- "all ten" --> commit["Remove all ten. Lobby"]
     verify -- "some taken, budget left" --> drop["Drop them, spend a retry"]
@@ -322,7 +322,7 @@ flowchart TD
     verify -- "selection came up short" --> cool
 ```
 
-**The race this closes.** Two workers select overlapping members and both commit them, so one player is seated in two lobbies. Between choosing members and removing them the chosen players are still visible to every other worker, and nothing records that anyone has claimed them. It fails silently: removal returns false for a player already gone and the commit loop ignores it, so both lobbies are internally valid and both are returned.
+**The race this closes.** Two workers select overlapping members and both commit them, so one player is placed in two lobbies. Between choosing members and removing them the chosen players are still visible to every other worker, and nothing records that anyone has claimed them. It fails silently: removal returns false for a player already gone and the commit loop ignores it, so both lobbies are internally valid and both are returned.
 
 **The commit is all or nothing.** Ten removals happen only if all ten recruits are still queued. A worker that loses has therefore taken nothing and owes nothing, which is what removes the need for a rollback.
 
@@ -354,7 +354,7 @@ flowchart TD
     anchor --> window["Anchor wait sets a radius.<br/>Query the index for that window"]
     window --> merge["Merge those buckets<br/>into wait time order"]
     merge --> walk{"Walk candidates.<br/>Admit while consent stays mutual"}
-    walk -- "ten seated" --> commit["Remove all ten from<br/>heap, index, and cooldown"]
+    walk -- "ten placed" --> commit["Remove all ten from<br/>heap, index, and cooldown"]
     commit --> lobby(["Lobby"])
     walk -- "candidates exhausted" --> cool["Anchor sits out<br/>a 10 second cooldown"]
     cool --> none
@@ -362,13 +362,13 @@ flowchart TD
 
 Both outcomes shrink the heap, so a caller can loop until nothing comes back without tracking which anchors it already tried.
 
-Two details that are easy to get wrong. The query window and the consent bounds start as the same two numbers and then diverge, so they are separate variables: the window never moves, the consent bounds narrow with every member seated. And a matched player is pulled from the cooldown queue as well as the heap and index, because cooling bars a player from anchoring but not from being recruited, and leaving them there would hand an already matched player back to the heap on a later drain.
+Two details that are easy to get wrong. The query window and the consent bounds start as the same two numbers and then diverge, so they are separate variables: the window never moves, the consent bounds narrow with every member placed. And a matched player is pulled from the cooldown queue as well as the heap and index, because cooling bars a player from anchoring but not from being recruited, and leaving them there would hand an already matched player back to the heap on a later drain.
 
 The failure mode, stated rather than left to be found: the pass is greedy and anchored on one player, so it can miss a valid lobby elsewhere in the queue.
 
 ### Worked example
 
-Shortened to a four seat lobby to keep the table readable. The real one seats ten.
+Shortened to a four slot lobby to keep the table readable. The real one holds ten.
 
 Anchor A has waited 300 seconds, which buys a radius of 899. Every candidate's own radius comes from their own wait.
 
@@ -382,15 +382,15 @@ Anchor A has waited 300 seconds, which buys a radius of 899. Every candidate's o
 
 The index is queried for 601 to 2399, so all five are in the window. The merge offers them longest waiting first: A, B, C, D, E.
 
-| Step | Seated span | Narrowest reach | Verdict |
+| Step | Placed span | Narrowest reach | Verdict |
 |---|---|---|---|
-| Seat A | 1500 to 1500 | 601 to 2399 | anchor seeds the set |
+| Place A | 1500 to 1500 | 601 to 2399 | anchor seeds the set |
 | Try B | 1500 to 1560 | 1127 to 1993 | admitted, the reach still covers the span |
 | Try C | 1500 to 2300 | 2050 to 1993 | rejected, C's floor of 2050 is above A at 1500 |
 | Try D | 1440 to 1560 | 1190 to 1690 | admitted |
 | Try E | 1440 to 1560 | 1419 to 1621 | admitted, lobby full |
 
-C is the instructive one. C sits comfortably inside the anchor's window, so a one sided check would have seated them, and C would then have been in a lobby with players 800 rating below anyone C is willing to play.
+C is the instructive one. C sits comfortably inside the anchor's window, so a one sided check would have placed them, and C would then have been in a lobby with players 800 rating below anyone C is willing to play.
 
 ## The consent check
 
@@ -400,7 +400,7 @@ Each player accepts a contiguous interval of ratings. A player whose interval re
 
 ```
 ratings ---------------------------------------------------->
-              span of seated players
+              span of placed players
               |<----------------->|
              1440              1560
 
@@ -413,7 +413,7 @@ ratings ---------------------------------------------------->
                              ^ floor above the span
 ```
 
-`Overlap` carries four numbers: the span, being the lowest and highest rating seated, and the narrowest reach, being the highest lower bound and the lowest upper bound across members. The pairing is not symmetric. The span takes outer values because it is a union. The reach takes inner ones because a requirement over all members is decided by whichever member reaches least.
+`Overlap` carries four numbers: the span, being the lowest and highest rating placed, and the narrowest reach, being the highest lower bound and the lowest upper bound across members. The pairing is not symmetric. The span takes outer values because it is a union. The reach takes inner ones because a requirement over all members is decided by whichever member reaches least.
 
 Adding a candidate folds all four forward and the set is valid while the reach still covers the span. The record is immutable, so a rejected candidate is discarded and leaves nothing to undo. Adding anyone can only widen the span and narrow the reach, so validity is monotone: a failed set cannot be rescued by adding more players.
 
@@ -438,7 +438,7 @@ One entry per rating rather than per player, so with ratings running 1 to 5000 t
 
 Insert creates a bucket immediately before adding to it, remove deletes one the moment it empties, and both take a single traversal. The invariant is that a bucket exists exactly while it holds a player, and `ratingCount` is exposed so a test can prove empty buckets are deleted rather than merely emptied.
 
-`entriesInRange` returns a lazy stream of the buckets between two inclusive bounds, each an unmodifiable view. It builds nothing: a mid distribution window can hold thousands of players when a lobby seats ten. Those views are live, and because both levels are skip lists the iteration is weakly consistent: it never throws while another thread mutates the index, and a player drawn from it may already have left. Verifying at commit is what makes that safe, not the draw itself.
+`entriesInRange` returns a lazy stream of the buckets between two inclusive bounds, each an unmodifiable view. It builds nothing: a mid distribution window can hold thousands of players when a lobby holds ten. Those views are live, and because both levels are skip lists the iteration is weakly consistent: it never throws while another thread mutates the index, and a player drawn from it may already have left. Verifying at commit is what makes that safe, not the draw itself.
 
 ## Fairness and the widening window
 
@@ -481,7 +481,7 @@ flowchart LR
     out -.->|"only that bucket advances"| b2
 ```
 
-Seeding takes one cursor and one head per bucket. From then on the longest waiting head wins, and only the winning bucket advances, so a draw costs a logarithm in the number of buckets rather than a scan. Sorting the window instead would cost a term over every candidate in it, to seat nine.
+Seeding takes one cursor and one head per bucket. From then on the longest waiting head wins, and only the winning bucket advances, so a draw costs a logarithm in the number of buckets rather than a scan. Sorting the window instead would cost a term over every candidate in it, to place nine.
 
 The heap holds bucket indices, not players. The heads list runs parallel to the cursor list, so reordering either would make an index stop naming its own bucket. Ordering lives in a third structure that owns neither. Because the comparator reads heads live, a draw is strictly poll, take, refill, push back, so an index is only ever out of the heap while its head moves. A spent bucket is never pushed back, which makes an index present exactly when its head is a player, and that is what lets the has next check be a size test.
 
@@ -503,7 +503,7 @@ window of ~1800 ratings          thousands of queued players
   one player, on demand                                     <- repeated ~10 times
 ```
 
-An anchor five minutes into the queue accepts a radius of 899, so the window spans roughly 1800 ratings and can hold thousands of players. A lobby seats ten. A list would build all of them to hand back ten.
+An anchor five minutes into the queue accepts a radius of 899, so the window spans roughly 1800 ratings and can hold thousands of players. A lobby holds ten. A list would build all of them to hand back ten.
 
 Instead the index hands back buckets rather than players, which costs one reference each and looks inside none of them, and the unmodifiable wrapper is a constant time view rather than a copy. The merge then unpacks those buckets one player at a time. The ordered sequence the matcher walks exists nowhere in memory: it is produced on demand, and a caller taking ten pays for ten draws.
 
@@ -539,7 +539,7 @@ Five counts, kept apart. `n_r` is the number of occupied ratings, bounded at 500
 | `Overlap`, per candidate tested | O(1) |
 | `SkillIndex.contains`, verifying one recruit | O(1) |
 | Seeding a `Selection`, once per pass | O(log n_r + b) |
-| Resuming one after a lost recruit | O(1) per seat refolded, no re-seed |
+| Resuming one after a lost recruit | O(1) per placement refolded, no re-seed |
 | `MatchMaker.enqueue` | O(log n_r + log n_b + log n_p) |
 | `MatchMaker.withdraw` | O(log n_r + log n_b + log n_p + n_c) |
 

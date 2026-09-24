@@ -52,7 +52,7 @@ The engine is a standalone module with no web framework and no network code, so 
 
 ### Project status
 
-The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several threads run it against one shared queue, and parties queued as a single entry and seated on one team, covered by 207 tests and a benchmark. It runs behind two services: `intake-service` takes players in over REST, `matchmaking-service` runs the engine, and the two talk only over RabbitMQ. Each service keeps its state in a PostgreSQL database of its own, so intake can run as several copies, and either service can restart without stranding a player: a restarted matchmaking has intake send every queued entry again, lost joins are found and sent again, and a heartbeat tells queued players when matchmaking is down, alongside an estimate of their wait. Match results move ratings. The services add 118 tests, run against a real PostgreSQL. Nothing is containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several threads run it against one shared queue, and parties queued as a single entry and placed on one team, covered by 207 tests and a benchmark. It runs behind two services: `intake-service` takes players in over REST, `matchmaking-service` runs the engine, and the two talk only over RabbitMQ. Each service keeps its state in a PostgreSQL database of its own, so intake can run as several copies, and either service can restart without stranding a player: a restarted matchmaking has intake send every queued entry again, lost joins are found and sent again, and a heartbeat tells queued players when matchmaking is down, alongside an estimate of their wait. Match results move ratings. The services add 118 tests, run against a real PostgreSQL. Nothing is containerised yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -195,7 +195,7 @@ Not yet implemented.
 - [x] Milestone 0, repo, CI, and the branch to pull request workflow
 - [x] Milestone 1, core engine, skill index, fairness heap, and matching algorithm
 - [x] Milestone 2, concurrency, the race reproduced and fixed
-- [x] Milestone 3, parties, queued as one entry and always seated on one team of five
+- [x] Milestone 3, parties, queued as one entry and always placed on one team of five
 - [x] Milestone 4, split into two services over RabbitMQ, REST API
 - [x] Milestone 5, PostgreSQL persistence, rating updates from results, and recovery from either service restarting
 - [ ] Milestone 6, Docker images and Compose for local development

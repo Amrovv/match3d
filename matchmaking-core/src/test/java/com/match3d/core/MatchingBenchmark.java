@@ -65,7 +65,7 @@ class MatchingBenchmark {
 
     @Test void reportAcrossWorkloads() throws InterruptedException {
         System.out.printf("%n%-24s %8s %8s %7s %8s %9s %9s %9s%n",
-                "workload", "lobbies", "seated", "queued", "retries", "contention",
+                "workload", "lobbies", "placed", "queued", "retries", "contention",
                 "starved", "stranded");
 
         for (Workload workload : WORKLOADS) {
@@ -85,7 +85,7 @@ class MatchingBenchmark {
 
             int duplicates = runs.stream().mapToInt(Result::duplicates).sum();
             if (duplicates != 0) {
-                System.out.println("  DUPLICATES SEATED: " + duplicates);
+                System.out.println("  DUPLICATES PLACED: " + duplicates);
             }
         }
         System.out.println();
@@ -148,13 +148,13 @@ class MatchingBenchmark {
         MatchingWorkerPool.Run run = pool.stop();
         long elapsed = System.currentTimeMillis() - started;
 
-        List<Player> seated = run.lobbies().stream()
+        List<Player> placed = run.lobbies().stream()
                                  .flatMap(lobby -> lobby.members().stream()).toList();
-        int distinct = (int) seated.stream().distinct().count();
+        int distinct = (int) placed.stream().distinct().count();
         int queued = index.entriesInRange(1, 5000).flatMap(Set::stream)
                           .mapToInt(QueueEntry::size).sum();
 
-        return new Result(run.lobbies().size(), seated.size() - distinct, queued,
+        return new Result(run.lobbies().size(), placed.size() - distinct, queued,
                 matcher.retryCount(), matcher.contentionCount(),
                 matcher.starvationCount(), matcher.strandedCount(), elapsed);
     }

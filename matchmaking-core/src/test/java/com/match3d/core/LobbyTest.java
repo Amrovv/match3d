@@ -101,6 +101,6 @@ class LobbyTest {
         List<Player> teamA = side(0);
 
         assertEquals(teamA.get(0), new Lobby(teamA, side(5)).anchor(),
-                "The anchor is seated first on team A, so the lobby knows whose wait set its window");
+                "The anchor is placed first on team A, so the lobby knows whose wait set its window");
     }
 }

@@ -109,7 +109,7 @@ public record Party(UUID id, List<Player> members, Instant queuedAt, int rating)
         return id.hashCode();
     }
 
-    /** Seats this party takes. */
+    /** Slots this party takes. */
     @Override
     public int size() {
         return members.size();

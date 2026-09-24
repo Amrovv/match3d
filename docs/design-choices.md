@@ -154,7 +154,7 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Options.** Let the leave find nothing, or record it for the pass to act on.
 
-**Chosen.** Record it. A claimed anchor is in none of the index, the heap and the cooldown queue, so a leave arriving mid walk finds nothing, and every ending of the pass then keeps the player: the commit seats them, cooling requeues them, and the abnormal exit reinserts them. `MatchMaker` tracks anchors in flight from poll to settle, and a leave for one of them is marked withdrawn. Every verify checks the mark first and drops the anchor. Both sets only ever hold anchors currently in flight, so neither grows. Members other than the anchor need nothing new, since a leave takes them out of the index and the verify already catches them.
+**Chosen.** Record it. A claimed anchor is in none of the index, the heap and the cooldown queue, so a leave arriving mid walk finds nothing, and every ending of the pass then keeps the player: the commit places them, cooling requeues them, and the abnormal exit reinserts them. `MatchMaker` tracks anchors in flight from poll to settle, and a leave for one of them is marked withdrawn. Every verify checks the mark first and drops the anchor. Both sets only ever hold anchors currently in flight, so neither grows. Members other than the anchor need nothing new, since a leave takes them out of the index and the verify already catches them.
 
 **Cost.** Two more sets to keep under the commit lock. No test can place a leave mid walk on demand, so the fix rests on a race test, 300 rounds of four runner threads against a leaving thread, which fails when the mark check is removed.
 
@@ -252,21 +252,21 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Options.** Keep the race test on its 300 solo players and test parties single threaded, or mix parties into the contended population.
 
-**Chosen.** Mixed. A party is claimed as one entry, so the anchor claim and the verify should keep it whole, but that is an argument, and every race the engine has had looked fine as an argument until eight threads ran it. Half of 280 people queue in parties, sizes cycling two, three, four, five in a fixed order, each party followed by as many solos. Solos fill the gaps parties leave: a queue of only four stacks forms nothing, since each side is left one seat short, and a round where nothing forms never races.
+**Chosen.** Mixed. A party is claimed as one entry, so the anchor claim and the verify should keep it whole, but that is an argument, and every race the engine has had looked fine as an argument until eight threads ran it. Half of 280 people queue in parties, sizes cycling two, three, four, five in a fixed order, each party followed by as many solos. Solos fill the gaps parties leave: a queue of only four stacks forms nothing, since each side is left one slot short, and a round where nothing forms never races.
 
 The order is fixed rather than random so a failing round reproduces.
 
-**Cost.** One shape of population, where a random one would wander into shapes nobody thought of. Two existing checks had to change units, since the engine claims entries and lobbies hold people: the nobody lost check now sums entry sizes, and the heap check looks up a seated player's entry first. Unchanged, the first fails on a correct run and the second passes on any run.
+**Cost.** One shape of population, where a random one would wander into shapes nobody thought of. Two existing checks had to change units, since the engine claims entries and lobbies hold people: the nobody lost check now sums entry sizes, and the heap check looks up a placed player's entry first. Unchanged, the first fails on a correct run and the second passes on any run.
 
 ### A lobby is two sides of five
 
-**Options.** Count ten seats into one list, as the walk did before parties, and split into teams afterwards, or fill two sides of five as the walk goes.
+**Options.** Count ten slots into one list, as the walk did before parties, and split into teams afterwards, or fill two sides of five as the walk goes.
 
-**Chosen.** Two sides during the walk. A party must sit on one team, and ten seats filled without regard to sides can be unsplittable: three parties of three and a solo fill every seat, and no subset of them adds up to five. Filling sides directly means every lobby that forms is already playable.
+**Chosen.** Two sides during the walk. A party must sit on one team, and ten slots filled without regard to sides can be unsplittable: three parties of three and a solo fill every slot, and no subset of them adds up to five. Filling sides directly means every lobby that forms is already playable.
 
-A candidate goes to the first side with room for all of it, team A before team B, and is passed over if neither has room. The check happens before seating and nothing seated is ever undone, so the walk stays one directional and never backtracks.
+A candidate goes to the first side with room for all of it, team A before team B, and is passed over if neither has room. The check happens before placing and nothing placed is ever undone, so the walk stays one directional and never backtracks.
 
-**Cost.** The walk can strand seats. A solo anchor and a four stack fill team A, a second four stack leaves team B one short, and if no solo remains in the window the pass fails holding nine usable players. The anchor cools and returns with a wider radius, so nothing breaks, but it is a second way for the greedy walk to miss a lobby that exists.
+**Cost.** The walk can strand slots. A solo anchor and a four stack fill team A, a second four stack leaves team B one short, and if no solo remains in the window the pass fails holding nine usable players. The anchor cools and returns with a wider radius, so nothing breaks, but it is a second way for the greedy walk to miss a lobby that exists.
 
 Measured, it is rare while solos are plentiful and dominant once they run out. 20k people, normal spread, eight workers, three seconds, three repeats: with half the people in parties, 2 passes stranded and nobody was left queued. With nine in ten in parties, 27318 passes stranded and 2000 people were never matched, because the parties left over had sizes that no combination makes into two fives. The queue in that run is closed, so no new solo ever arrives to finish a side. A live queue keeps receiving them, which makes this a worst case rather than a steady state.
 
@@ -276,7 +276,7 @@ Measured, it is rare while solos are plentiful and dominant once they run out. 2
 
 **Chosen.** One entry. A party with one shared queue time and one rating carries exactly what the index, the heap and the consent check consume, so it goes through all three unchanged. It is polled as one anchor, offered by the merge as one candidate, and checked for consent as one rating.
 
-Queueing members individually breaks on recruitment. The walk offers candidates one at a time and has no idea two of them are friends, so it can seat two of a three stack and leave the third. A single entry makes that impossible, because the merge never offers half of one.
+Queueing members individually breaks on recruitment. The walk offers candidates one at a time and has no idea two of them are friends, so it can place two of a three stack and leave the third. A single entry makes that impossible, because the merge never offers half of one.
 
 It is also cheaper. Every draw, consent check, verify and removal is paid once per entry, so a lobby of two five stacks costs about two of each where a lobby of solos costs ten. 20k people, normal spread, eight workers, fifteen repeats: 731 lobbies in 100ms with solos only, 1097 with half the people in parties, 1208 with nine in ten.
 
@@ -286,7 +286,7 @@ It is also cheaper. Every draw, consent check, verify and removal is paid once p
 
 **Options.** A party as a subclass of player, a shared abstract class, or a sealed interface that both implement.
 
-**Chosen.** `QueueEntry`, sealed over `Player` and `Party`. A record is final, so a party cannot extend a player, and a player is not a special case of a party anyway. The interface is small: id, rating, queue time, size and members. A player answers size one and a member list of itself, which is what lets `MatchMaker` treat both the same everywhere. Without that, every seat count and every commit would carry a branch on which kind of entry it holds.
+**Chosen.** `QueueEntry`, sealed over `Player` and `Party`. A record is final, so a party cannot extend a player, and a player is not a special case of a party anyway. The interface is small: id, rating, queue time, size and members. A player answers size one and a member list of itself, which is what lets `MatchMaker` treat both the same everywhere. Without that, every slot count and every commit would carry a branch on which kind of entry it holds.
 
 **Cost.** A player now carries two methods that only mean something for parties, and code that needs people rather than entries has to unpack members explicitly.
 
@@ -370,23 +370,23 @@ The two problems with an unsynchronised selection are that it reads live views a
 
 **Amended.** Being in neither structure also hid a claimed anchor from a leave. `MatchMaker` now records anchors in flight, and a leave for one is marked for its pass to act on.
 
-### A retry budget of the seats standing
+### A retry budget of the slots standing
 
 **Options.** Abandon the pass when a member is taken, retry without limit, or retry a bounded number of times.
 
-**Chosen.** Bounded, and the bound is the number of seats still standing at the first failed verify, so a nearly complete lobby is worth more persistence than a bare one. It is set once. Recomputing it from a later, fuller selection lets it grow, and the loop stops terminating under exactly the contention it exists for.
+**Chosen.** Bounded, and the bound is the number of slots still standing at the first failed verify, so a nearly complete lobby is worth more persistence than a bare one. It is set once. Recomputing it from a later, fuller selection lets it grow, and the loop stops terminating under exactly the contention it exists for.
 
 Retrying is for contention, where another worker committed and the index has changed. A refill that finds nobody is starvation, where nothing has changed and asking again microseconds later returns the same answer, so that cools instead.
 
-**Cost.** A selection that starts at three seats and grows to nine keeps the budget of three, so a lobby that became valuable mid pass is not credited for it. Termination is worth more than the credit.
+**Cost.** A selection that starts at three slots and grows to nine keeps the budget of three, so a lobby that became valuable mid pass is not credited for it. Termination is worth more than the credit.
 
-**Amended.** The budget was computed as members seated minus members lost, which was the seat count only while every member was one person. With parties it counts seats explicitly, each entry contributing its size, so losing a five stack costs a pass five seats rather than one.
+**Amended.** The budget was computed as members placed minus members lost, which was the slot count only while every member was one person. With parties it counts slots explicitly, each entry contributing its size, so losing a five stack costs a pass five slots rather than one.
 
 ### A retry resumes the walk rather than re-seeding it
 
 **Options.** Rebuild the candidate merge for each attempt, or carry the cursor and the consent state across attempts.
 
-**Chosen.** Carry them. Seeding touches every occupied rating in the window and is the expensive part of a pass; seating a player is a logarithm in the bucket count. Rebuilding to save nine constant time consent checks made a retry cost what a whole fresh pass costs, which is why the first version of the retry loop measured no better than abandoning.
+**Chosen.** Carry them. Seeding touches every occupied rating in the window and is the expensive part of a pass; placing a player is a logarithm in the bucket count. Rebuilding to save nine constant time consent checks made a retry cost what a whole fresh pass costs, which is why the first version of the retry loop measured no better than abandoning.
 
 20k players, normal spread, eight workers, fifteen repeats: 399 lobbies in 100ms rebuilding, 988 resuming.
 
@@ -412,7 +412,7 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** None worth naming. The strict choice turned out to be the cheap one.
 
-### Remaining seats go to the longest waiting
+### Remaining slots go to the longest waiting
 
 **Options.** Closest rating first, or longest waiting first.
 
@@ -420,13 +420,13 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Cost.** A lobby fills with the other stragglers, who are precisely the players furthest from the rating mass. Fairness and match quality pull against each other here. The radius caps how bad it gets.
 
-**Amended.** Still longest waiting first, but a candidate is now also skipped when neither team has room for all of it. The walk previously stopped at ten seats in one list; it now fills two teams of five.
+**Amended.** Still longest waiting first, but a candidate is now also skipped when neither team has room for all of it. The walk previously stopped at ten slots in one list; it now fills two teams of five.
 
 ### One attempt per call
 
 **Options.** Loop internally until something forms, or return after one attempt.
 
-**Chosen.** One attempt. Every call either seats ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold the commit lock across an unbounded number of attempts.
+**Chosen.** One attempt. Every call either places ten players or cools one anchor, so both outcomes shrink the heap and a caller loop terminates without tracking what it tried. Looping internally would hold the commit lock across an unbounded number of attempts.
 
 **Cost.** The matcher alone does nothing. Cadence belongs to the caller.
 
@@ -456,7 +456,7 @@ This looked like it would force backtracking and nearly forced a redesign away f
 
 **Options.** Materialise the window and sort, or merge across already ordered bucket heads.
 
-**Chosen.** Merge. Sorting costs a term over every candidate in the window to seat nine. The merge holds bucket indices rather than head players, because the heads and cursor lists run in parallel and reordering either would make an index stop naming its own bucket.
+**Chosen.** Merge. Sorting costs a term over every candidate in the window to place nine. The merge holds bucket indices rather than head players, because the heads and cursor lists run in parallel and reordering either would make an index stop naming its own bucket.
 
 **Cost.** Seeding is eager, touching one player per occupied rating in the window whether the caller draws any or not. Bounded by window width, never by queue size.
 
@@ -570,7 +570,7 @@ Equality inside a bucket is now the comparator's, queue time then id, rather tha
 
 **Chosen.** Buckets. The k way merge needs the bucket boundaries to work at all, and flattening destroys exactly the per bucket ordering it merges on. No second method was added, since the matcher is the only consumer and it always wants buckets.
 
-Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper rather than a copy. An eager copy was rejected twice over: it guarantees no ordering, which would silently destroy the wait time order the buckets exist to preserve, and copying a window to seat ten players is the cost the whole design avoids.
+Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper rather than a copy. An eager copy was rejected twice over: it guarantees no ordering, which would silently destroy the wait time order the buckets exist to preserve, and copying a window to place ten players is the cost the whole design avoids.
 
 **Cost.** The caller sees an internal shape, so the index and the merge are coupled to each other.
 
@@ -580,7 +580,7 @@ Buckets leave wrapped in an unmodifiable view, which is a constant time wrapper 
 
 **Options.** A materialised list, an iterator, or a stream of live bucket views.
 
-**Chosen.** A stream. This is the decision the rest of the index hangs on. An anchor five minutes into the queue accepts a radius of 899, so the window spans roughly 1800 ratings and can hold thousands of queued players. A lobby seats ten. Returning a list means building every one of those to hand back ten, which throws away the entire advantage of indexing by rating in the first place.
+**Chosen.** A stream. This is the decision the rest of the index hangs on. An anchor five minutes into the queue accepts a radius of 899, so the window spans roughly 1800 ratings and can hold thousands of queued players. A lobby holds ten. Returning a list means building every one of those to hand back ten, which throws away the entire advantage of indexing by rating in the first place.
 
 A stream rather than an iterator because it composes: `flatMap`, `limit` and `takeWhile` come free, which is how tests flatten buckets back to players in one line and how the matcher stops early without a loop tracking its own count.
 

@@ -8,7 +8,7 @@ import java.util.UUID;
 /**
  * One entity waiting in the queue, which is either a player alone or a party
  * that queued together. The structures hold these rather than players, so a
- * party is polled, offered and seated as a unit and can never be half matched.
+ * party is polled, offered and placed as a unit and can never be half matched.
  *
  * An entry carries one rating and one queue time however many people it is,
  * which is what lets the index, the heap and the consent check stay unchanged.
@@ -25,7 +25,7 @@ public sealed interface QueueEntry permits Player, Party {
     /** Shared across a party, so its members widen together. */
     Instant queuedAt();
 
-    /** Seats this entry takes. Always 1 for a player. */
+    /** Slots this entry takes. Always 1 for a player. */
     int size();
 
     /** The people in it. A player is their own sole member. */
