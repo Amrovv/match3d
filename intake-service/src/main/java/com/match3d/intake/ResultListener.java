@@ -62,14 +62,16 @@ public class ResultListener {
 
     /** Keeps the reason against the members, then forgets an entry that was never queued. */
     void onRejected(EntryRejected rejected) {
-        switch (rejected.reason()) {
-            case SPREAD_TOO_WIDE -> {
-                List<UUID> players = collectPlayers(List.of(rejected.entryId()));
-                rejections.record(players, rejected.reason());
-                registry.remove(rejected.entryId());
-            }
-            case DUPLICATE -> {} // do nothing; redelivery
-        }
+        // An expression, so a new reason fails to compile until it is handled here.
+        boolean refused = switch (rejected.reason()) {
+            case SPREAD_TOO_WIDE, UNKNOWN_PLAYER -> true;
+            case DUPLICATE -> false; // redelivery of an entry already queued
+        };
+        if (!refused) return;
+
+        List<UUID> players = collectPlayers(List.of(rejected.entryId()));
+        rejections.record(players, rejected.reason());
+        registry.remove(rejected.entryId());
     }
 
     /** The players inside these entries. Entries intake no longer holds are skipped. */
