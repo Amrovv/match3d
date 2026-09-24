@@ -51,6 +51,12 @@ public class MatchmakingApp {
     }
 
     @Bean
+    MatchResults matchResults(MatchRepository matches, PlayerMatchRepository seats,
+                              PlayerRepository players, Clock clock) {
+        return new MatchResults(matches, seats, players, clock);
+    }
+
+    @Bean
     Clock clock() {
         return Clock.systemUTC();
     }
