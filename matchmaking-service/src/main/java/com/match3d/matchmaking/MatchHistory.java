@@ -35,6 +35,13 @@ public class MatchHistory {
         seats.saveAll(rows);
     }
 
+    /** Removes a match whose lobby was never announced, seats first for the foreign key. */
+    @Transactional
+    public void forget(UUID matchId) {
+        seats.deleteByMatchId(matchId);
+        matches.deleteById(matchId);
+    }
+
     public Optional<MatchRecord> match(UUID matchId) {
         return matches.findById(matchId).map(row -> toRecords(List.of(row)).get(0));
     }

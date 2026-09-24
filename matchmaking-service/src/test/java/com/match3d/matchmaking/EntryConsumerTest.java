@@ -47,6 +47,7 @@ class EntryConsumerTest extends PostgresTest {
     @Autowired private RatingStore ratings;
     @Autowired private MatchHistory history;
     @Autowired private PlayerMatchRepository seats;
+    @Autowired private MatchRepository matches;
 
     private MatchRunner runner;
     private EntryConsumer consumer;
@@ -253,5 +254,39 @@ class EntryConsumerTest extends PostgresTest {
         props.setType("EntryTeleported");
 
         assertThrows(IllegalArgumentException.class, () -> consumer.onMessage(new Message(new byte[0], props)));
+    }
+
+    @Test void testFailedAnnounceReturnsEntriesAndForgetsTheMatch() {
+        List<UUID> members = ids(5);
+        UUID partyId = party(members);
+        List<UUID> solos = solos(5);
+        publisher.down = true;
+
+        runner.runPasses();
+
+        assertEquals(0, matches.count(), "A lobby never announced leaves no match behind");
+        assertEquals(10, index.playerCount(), "All ten are back in the engine");
+        assertEquals(6, index.entryCount(), "The party is back whole, as one entry");
+        assertTrue(index.contains(partyId));
+        assertEquals(NOW, queued(partyId).queuedAt(), "Keeping its original queue time");
+        assertEquals(partyId, book.entryOf(members.get(0)), "And the book still maps its members");
+
+        publisher.down = false;
+        runner.runPasses();
+
+        assertEquals(1, matched().size(), "Once the broker is back, the lobby forms and is announced");
+        assertEquals(1, matches.count());
+        assertTrue(solos.stream().allMatch(id -> book.entryOf(id) == null), "And only then forgotten");
+    }
+
+    /** Only the first publish fails, so a round that carried on would announce the reformed lobby. */
+    @Test void testFailedAnnounceStopsThePasses() {
+        solos(20);
+        publisher.failNext = 1;
+
+        runner.runPasses();
+
+        assertTrue(publisher.published.isEmpty(), "One failure ends the round instead of retrying the same lobby");
+        assertEquals(20, index.playerCount());
     }
 }
