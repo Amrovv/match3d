@@ -21,5 +21,5 @@ CREATE TABLE heartbeat (
 CREATE TABLE wait_bands (
     band               integer PRIMARY KEY,
     total_wait_seconds double precision NOT NULL,
-    seats              bigint NOT NULL
+    players            bigint NOT NULL
 );

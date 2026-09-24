@@ -32,9 +32,9 @@ Each service has a Postgres database of its own, and neither reads the other's. 
 | `matches` | When a match formed, and once it has a result, the winning side and when it ended. Indexed on `formed_at`. |
 | `player_matches` | One row per player per match: side, the rating they had and when they queued. Indexed on `player_id`, since the key leads with the match. |
 
-A player exists before they queue. Accounts belong to a system this project stands in for, so `POST /players` creates one at 2500 under the caller's own id, answering 409 if it exists, and running with the `local` profile loads twenty seeded players with ids ending 001 to 020. A join naming anyone with no row is refused as `UNKNOWN_PLAYER`, which also keeps every seat's foreign key satisfied.
+A player exists before they queue. Accounts belong to a system this project stands in for, so `POST /players` creates one at 2500 under the caller's own id, answering 409 if it exists, and running with the `local` profile loads twenty seeded players with ids ending 001 to 020. A join naming anyone with no row is refused as `UNKNOWN_PLAYER`, which also keeps the foreign key from each player's match row satisfied.
 
-A formed match is written as its row and ten seats in one transaction, before `EntryMatched` is published. History reads cost three queries however long the history: the player's match ids, those matches newest first, and every seat of all of them at once, grouped into teams in Java.
+A formed match is written as its row and ten player rows in one transaction, before `EntryMatched` is published. History reads cost three queries however long the history: the player's match ids, those matches newest first, and the player rows of all of them at once, grouped into teams in Java.
 
 ### Results and ratings
 
@@ -88,7 +88,7 @@ The sweeper runs every ten seconds on every intake copy and sends again any entr
 
 ### The heartbeat and the wait estimate
 
-Every ten seconds matchmaking sends `MatchmakingAlive`, carrying the last hour's waits grouped by the rating each seat had, in bands of 100, as a total and a count per band. Intake stamps the arrival with its own clock and replaces its bands. A queued player's status then reads:
+Every ten seconds matchmaking sends `MatchmakingAlive`, carrying the last hour's waits grouped by the rating each player had, in bands of 100, as a total and a count of players per band. Intake stamps the arrival with its own clock and replaces its bands. A queued player's status then reads:
 
 ```json
 {"state": "QUEUED", "entryId": "...", "matchmaking": "UP", "estimatedWaitSeconds": 45}
@@ -96,15 +96,15 @@ Every ten seconds matchmaking sends `MatchmakingAlive`, carrying the last hour's
 
 The estimate averages the bands within five of the entry's own, which is roughly plus or minus 500 rating. Shortened to three bands, for an entry queued at 2537, in band 25:
 
-| Band | Ratings | Total wait | Seats |
+| Band | Ratings | Total wait | Players |
 |---|---|---|---|
 | 20 | 2000 to 2099 | 100 s | 2 |
 | 25 | 2500 to 2599 | 30 s | 1 |
 | 30 | 3000 to 3099 | 50 s | 1 |
 
-Bands 20 to 30 are in range, so the estimate is 180 seconds over 4 seats, 45. A band of 19 or 31 would be left out. Totals and counts are sent rather than averages because averages of bands cannot be combined without their counts.
+Bands 20 to 30 are in range, so the estimate is 180 seconds over 4 players, 45. A band of 19 or 31 would be left out. Totals and counts are sent rather than averages because averages of bands cannot be combined without their counts.
 
-With no heartbeat for 30 seconds, or none ever, status reads `"matchmaking": "DOWN"` and gives no estimate. An entry not yet confirmed, or with no recent seats in range, reads up with the estimate left out.
+With no heartbeat for 30 seconds, or none ever, status reads `"matchmaking": "DOWN"` and gives no estimate. An entry not yet confirmed, or with no recently matched players in range, reads up with the estimate left out.
 
 ## Two services over a queue
 

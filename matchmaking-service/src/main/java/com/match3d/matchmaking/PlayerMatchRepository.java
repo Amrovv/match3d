@@ -20,7 +20,7 @@ public interface PlayerMatchRepository extends JpaRepository<PlayerMatchRow, Pla
     @Query(value = "delete from player_matches where match_id = :matchId", nativeQuery = true)
     int deleteByMatchId(UUID matchId);
 
-    /** Per band of 100 by rating before: band, total seconds from queued to formed, seats. Matches formed since. */
+    /** Per band of 100 by rating before: band, total seconds from queued to formed, players. Matches formed since. */
     @Query(value = """
             select pm.rating_before / 100, sum(extract(epoch from (m.formed_at - pm.queued_at))), count(*)
             from matches m join player_matches pm on pm.match_id = m.id

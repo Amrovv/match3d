@@ -106,7 +106,7 @@ flowchart TD
     end
 
     service --> core
-    service --> db[("PostgreSQL<br/>ratings, matches,<br/>seats with queue times")]
+    service --> db[("PostgreSQL<br/>ratings, matches,<br/>each player's rating and<br/>queue time per match")]
     service -->|"REST: players, matches, history, results"| player
 ```
 
@@ -214,7 +214,7 @@ Not yet implemented.
 * A leave arriving while intake requeues after a matchmaking restart can leave an entry in the engine that intake has forgotten.
 * Matchmaking is reported down only after 30 seconds without a heartbeat, and a lost join is found by the sweeper only after about 40 seconds.
 * A party refused for an unknown member is not told which member it was.
-* Wait estimates count matched players only, since leavers are never recorded. They use rating bands of 100, so plus or minus 500 is approximate at its edges, and a party is estimated from every kind of seat, which likely flatters it.
+* Wait estimates count matched players only, since leavers are never recorded. They use rating bands of 100, so plus or minus 500 is approximate at its edges, and a party is estimated from solos and parties alike, which likely flatters it.
 * A message a service cannot handle is logged and dropped. There is no dead letter queue to keep it for inspection.
 * Joining a party while already queued is refused rather than moving the player into it.
 * Every commit serialises through one lock, so the engine scales by making passes cheap rather than by running more of them. Sharding the queue by rating band is the recorded next step.

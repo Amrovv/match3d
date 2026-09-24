@@ -195,7 +195,7 @@ class IntakeStoreTest extends PostgresTest {
 
         assertEquals(StatusResponse.Matchmaking.UP, matchmaking(player));
         assertEquals(45L, store.status(player).estimatedWaitSeconds(),
-                "Bands 20 to 30 lie within 500 of band 25: 180 seconds over 4 seats");
+                "Bands 20 to 30 lie within 500 of band 25: 180 seconds over 4 players");
     }
 
     @Test void testBandsFurtherThanFiveAwayLeftOut() {

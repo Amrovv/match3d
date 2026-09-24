@@ -52,7 +52,7 @@ class QueryControllerTest extends PostgresTest {
         assertEquals(HttpStatus.OK, response.getStatusCode());
         MatchRecord match = response.getBody();
         assertEquals(NOW, match.formedAt());
-        assertEquals(Set.of(a1.id(), a2.id()), Set.copyOf(match.teamA()), "Seats are split by side");
+        assertEquals(Set.of(a1.id(), a2.id()), Set.copyOf(match.teamA()), "Players are split by side");
         assertEquals(Set.of(b1.id(), b2.id()), Set.copyOf(match.teamB()));
     }
 
@@ -83,7 +83,7 @@ class QueryControllerTest extends PostgresTest {
 
         try {
             assertThrows(DataIntegrityViolationException.class, () -> history.record(matchId, NOW, lobby),
-                    "A seat without a players row breaks the foreign key");
+                    "A player with no players row breaks the foreign key");
             assertFalse(matches.existsById(matchId), "So the match row is rolled back with it");
         } finally {
             wipe();
@@ -109,6 +109,6 @@ class QueryControllerTest extends PostgresTest {
         assertEquals(List.of(a1.id()), one.teamA());
         assertEquals(List.of(b1.id()), one.teamB());
         assertEquals(List.of(a2.id()), two.teamA());
-        assertEquals(List.of(b2.id()), two.teamB(), "Seats never cross between matches");
+        assertEquals(List.of(b2.id()), two.teamB(), "Players never cross between matches");
     }
 }

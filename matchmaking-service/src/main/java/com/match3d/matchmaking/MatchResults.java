@@ -23,13 +23,13 @@ public class MatchResults {
     }
 
     private final MatchRepository matches;
-    private final PlayerMatchRepository seats;
+    private final PlayerMatchRepository playerMatches;
     private final PlayerRepository players;
     private final Clock clock;
 
-    public MatchResults(MatchRepository matches, PlayerMatchRepository seats, PlayerRepository players, Clock clock) {
+    public MatchResults(MatchRepository matches, PlayerMatchRepository playerMatches, PlayerRepository players, Clock clock) {
         this.matches = matches;
-        this.seats = seats;
+        this.playerMatches = playerMatches;
         this.players = players;
         this.clock = clock;
     }
@@ -46,8 +46,8 @@ public class MatchResults {
 
         List<UUID> won = new ArrayList<>();
         List<UUID> lost = new ArrayList<>();
-        for (PlayerMatchRow seat : seats.findByKeyMatchIdIn(List.of(matchId))) {
-            (seat.getSide() == winner ? won : lost).add(seat.getPlayerId());
+        for (PlayerMatchRow played : playerMatches.findByKeyMatchIdIn(List.of(matchId))) {
+            (played.getSide() == winner ? won : lost).add(played.getPlayerId());
         }
         players.adjust(won, RATING_CHANGE);
         players.adjust(lost, -RATING_CHANGE);

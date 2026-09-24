@@ -47,7 +47,7 @@ class EntryConsumerTest extends PostgresTest {
 
     @Autowired private RatingStore ratings;
     @Autowired private MatchHistory history;
-    @Autowired private PlayerMatchRepository seats;
+    @Autowired private PlayerMatchRepository playerMatches;
     @Autowired private MatchRepository matches;
 
     private MatchRunner runner;
@@ -219,7 +219,7 @@ class EntryConsumerTest extends PostgresTest {
         assertEquals(expected, held, "Each member is queued at their own stored rating");
     }
 
-    @Test void testSeatsStoreWhatEngineUsed() {
+    @Test void testPlayerRowsStoreWhatEngineUsed() {
         Map<UUID, Integer> rating = new HashMap<>();
         Map<UUID, Instant> queuedAt = new HashMap<>();
         for (int i = 0; i < 10; i++) {
@@ -233,7 +233,7 @@ class EntryConsumerTest extends PostgresTest {
         }
         runner.runPasses();
 
-        List<PlayerMatchRow> rows = seats.findByKeyMatchIdIn(List.of(matched().get(0).matchId()));
+        List<PlayerMatchRow> rows = playerMatches.findByKeyMatchIdIn(List.of(matched().get(0).matchId()));
         assertEquals(10, rows.size());
         for (PlayerMatchRow row : rows) {
             assertEquals(rating.get(row.getPlayerId()), row.getRatingBefore(), "Rating before is the queued rating");

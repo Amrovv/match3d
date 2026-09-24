@@ -9,7 +9,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * One player's seat in one match. Ids are plain columns, not associations,
+ * One player's row in one match. Ids are plain columns, not associations,
  * so loading a row never fetches a match or a player behind it.
  */
 @Entity

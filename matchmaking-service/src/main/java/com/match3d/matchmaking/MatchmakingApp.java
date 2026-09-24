@@ -48,14 +48,14 @@ public class MatchmakingApp {
     }
 
     @Bean
-    MatchHistory matchHistory(MatchRepository matches, PlayerMatchRepository seats) {
-        return new MatchHistory(matches, seats);
+    MatchHistory matchHistory(MatchRepository matches, PlayerMatchRepository playerMatches) {
+        return new MatchHistory(matches, playerMatches);
     }
 
     @Bean
-    MatchResults matchResults(MatchRepository matches, PlayerMatchRepository seats,
+    MatchResults matchResults(MatchRepository matches, PlayerMatchRepository playerMatches,
                               PlayerRepository players, Clock clock) {
-        return new MatchResults(matches, seats, players, clock);
+        return new MatchResults(matches, playerMatches, players, clock);
     }
 
     @Bean

@@ -160,11 +160,11 @@ public class IntakeStore {
                 insert into heartbeat (id, last_seen) values (1, ?)
                 on conflict (id) do update set last_seen = excluded.last_seen""", Timestamp.from(clock.instant()));
         jdbc.update("delete from wait_bands");
-        jdbc.batchUpdate("insert into wait_bands (band, total_wait_seconds, seats) values (?, ?, ?)", bands,
+        jdbc.batchUpdate("insert into wait_bands (band, total_wait_seconds, players) values (?, ?, ?)", bands,
                 bands.size(), (ps, band) -> {
                     ps.setInt(1, band.band());
                     ps.setDouble(2, band.totalWaitSeconds());
-                    ps.setLong(3, band.seats());
+                    ps.setLong(3, band.players());
                 });
     }
 
@@ -178,7 +178,7 @@ public class IntakeStore {
     private Long estimateWait(int rating) {
         int band = WaitBand.of(rating);
         return jdbc.queryForObject("""
-                select case when sum(seats) > 0 then round(sum(total_wait_seconds) / sum(seats)) end
+                select case when sum(players) > 0 then round(sum(total_wait_seconds) / sum(players)) end
                 from wait_bands where band between ? and ?""", Long.class,
                 band - ESTIMATE_BANDS, band + ESTIMATE_BANDS);
     }

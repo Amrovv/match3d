@@ -24,7 +24,7 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Options.** Estimate each entry once when the engine accepts it and store the number in intake, ask matchmaking at status time, or send current waits by rating band on every heartbeat and estimate in intake.
 
-**Chosen.** The heartbeat. Every ten seconds `MatchmakingAlive` carries the last hour's waits, grouped into bands of 100 by the rating each seat had when it waited, as a total and a count per band so bands combine exactly. `EntryAccepted` carries the rating the engine queued the entry at, a party's derived rating included, and intake averages the bands within five of it at status time. The estimate refreshes every ten seconds, and matchmaking runs one grouped query per beat instead of one per join, so its cost no longer grows with traffic. Asking at status time was rejected because it is a direct call between the services, and it makes every status poll load the one service that cannot scale out.
+**Chosen.** The heartbeat. Every ten seconds `MatchmakingAlive` carries the last hour's waits, grouped into bands of 100 by the rating each player had when they waited, as a total and a count of players per band so bands combine exactly. `EntryAccepted` carries the rating the engine queued the entry at, a party's derived rating included, and intake averages the bands within five of it at status time. The estimate refreshes every ten seconds, and matchmaking runs one grouped query per beat instead of one per join, so its cost no longer grows with traffic. Asking at status time was rejected because it is a direct call between the services, and it makes every status poll load the one service that cannot scale out.
 
 **Cost.** Bands make plus or minus 500 approximate at its edges, a 2537 player averaging 2000 to 3099. Intake keeps each entry's rating and the latest bands, two pieces of matchmaking's data it would otherwise not hold. The estimate counts matched players only, since leavers are never recorded.
 
@@ -56,7 +56,7 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Options.** Log the failure and keep the match, return the entries and keep the match row, or return the entries and delete the match.
 
-**Chosen.** Undo it. If `EntryMatched` cannot be published, the match and its seats are deleted in one transaction and each entry goes back into the engine through `enqueue`, a party rebuilt whole under its entry id, with its original queue time. The round of passes stops there, or it would form the same lobby again at once and spin while the broker is down.
+**Chosen.** Undo it. If `EntryMatched` cannot be published, the match and its player rows are deleted in one transaction and each entry goes back into the engine through `enqueue`, a party rebuilt whole under its entry id, with its original queue time. The round of passes stops there, or it would form the same lobby again at once and spin while the broker is down.
 
 **Cost.** A lobby waits for the next round, a second later, once the broker is back. A crash between saving the match and publishing it leaves a match that is never resulted, in both players' history; the restart requeue matches them again.
 
@@ -124,9 +124,9 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Cost.** Two ways of writing to the database, repository methods and native statements, and a reader has to know which is which.
 
-### Seats keep the rating and queue time at the match
+### Each player's match row keeps their rating and queue time
 
-**Options.** Keep only each player's current rating, or snapshot it on every seat.
+**Options.** Keep only each player's current rating, or snapshot it on each player's row in a match.
 
 **Chosen.** Snapshot. `player_matches` holds one row per player per match with side, rating before and queued at, because `players.rating` is overwritten by every result and queue time analytics need what each player had when they waited. Queue time is formed at minus queued at, so no separate table of queue events is kept. `matches.formed_at` is indexed for the last hour's waits, and `player_matches.player_id` for history, since the primary key leads with the match.
 

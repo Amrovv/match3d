@@ -34,7 +34,7 @@ class WaitBandsTest extends PostgresTest {
                 List.of(waited(ratingA, seconds, formedAt)), List.of(waited(ratingB, seconds, formedAt))));
     }
 
-    @Test void testGroupsSeatsIntoBandsOfAHundred() {
+    @Test void testGroupsPlayersIntoBandsOfAHundred() {
         matched(2500, 2599, 20, NOW.minusSeconds(60));
         matched(2550, 2600, 40, NOW.minusSeconds(120));
 
