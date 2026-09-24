@@ -4,6 +4,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -14,6 +15,8 @@ public interface PlayerRepository extends JpaRepository<PlayerRow, UUID> {
     List<PlayerRow> findByMatchId(UUID matchId);
 
     List<PlayerRow> findByEntryIdIsNotNull();
+
+    List<PlayerRow> findByEntryIdIn(Collection<UUID> entryIds);
 
     /** Queues a player under the entry unless already queued, clearing any match or refusal. 1 if claimed. */
     @Modifying(flushAutomatically = true, clearAutomatically = true)

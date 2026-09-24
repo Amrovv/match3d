@@ -6,9 +6,13 @@ import org.springframework.data.jpa.repository.Query;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.List;
 import java.util.UUID;
 
 public interface EntryRepository extends JpaRepository<EntryRow, UUID> {
+
+    /** Sent before the cutoff and still unconfirmed, through the partial index on sent_at. */
+    List<EntryRow> findByAcceptedAtIsNullAndSentAtBefore(Instant cutoff);
 
     /** 1 if inserted, 0 if another join holds the id, as a solo's entry id is their own. */
     @Modifying(flushAutomatically = true, clearAutomatically = true)

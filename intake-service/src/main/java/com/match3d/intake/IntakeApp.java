@@ -9,12 +9,14 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Starts intake. Spring builds each object returned by a @Bean method once and
  * hands it to any class whose constructor asks for that type.
  */
 @SpringBootApplication
+@EnableScheduling
 public class IntakeApp {
 
     public static void main(String[] args) {

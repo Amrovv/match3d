@@ -25,6 +25,9 @@ import org.springframework.transaction.annotation.Transactional;
  */
 public class IntakeStore {
 
+    /** How long a sent entry may go unconfirmed before the sweeper sends it again. */
+    static final Duration RESEND_AFTER = Duration.ofSeconds(30);
+
     /** Three missed heartbeats of ten seconds. */
     static final Duration DOWN_AFTER = Duration.ofSeconds(30);
 
@@ -117,6 +120,30 @@ public class IntakeStore {
             joins.add(new EntryQueued(entry.getId(), members.get(entry.getId()), entry.getQueuedAt()));
         }
         if (!joins.isEmpty()) entries.markSent(joins.stream().map(EntryQueued::entryId).toList(), clock.instant());
+        return joins;
+    }
+
+    /**
+     * Entries sent over 30 seconds ago and never confirmed, as joins with their
+     * original queue times, marked sent again. Such an entry was lost between
+     * an intake commit and its publish, or matchmaking is down.
+     */
+    @Transactional
+    public List<EntryQueued> resendDue() {
+        Instant now = clock.instant();
+        List<EntryRow> due = entries.findByAcceptedAtIsNullAndSentAtBefore(now.minus(RESEND_AFTER));
+        if (due.isEmpty()) return List.of();
+
+        List<UUID> ids = due.stream().map(EntryRow::getId).toList();
+        Map<UUID, List<UUID>> members = new HashMap<>();
+        for (PlayerRow row : players.findByEntryIdIn(ids)) {
+            members.computeIfAbsent(row.getEntryId(), id -> new ArrayList<>()).add(row.getId());
+        }
+        List<EntryQueued> joins = new ArrayList<>();
+        for (EntryRow entry : due) {
+            joins.add(new EntryQueued(entry.getId(), members.get(entry.getId()), entry.getQueuedAt()));
+        }
+        entries.markSent(ids, now);
         return joins;
     }
 
