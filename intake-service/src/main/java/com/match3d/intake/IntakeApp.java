@@ -21,18 +21,8 @@ public class IntakeApp {
     }
 
     @Bean
-    QueueRegistry queueRegistry() {
-        return new QueueRegistry();
-    }
-
-    @Bean
-    MatchBoard matchBoard() {
-        return new MatchBoard();
-    }
-
-    @Bean
-    RejectionBoard rejectionBoard() {
-        return new RejectionBoard();
+    IntakeStore intakeStore(EntryRepository entries, PlayerRepository players) {
+        return new IntakeStore(entries, players);
     }
 
     @Bean
