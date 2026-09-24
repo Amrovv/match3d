@@ -2,11 +2,14 @@ package com.match3d.intake;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
 
 import org.springframework.transaction.annotation.Transactional;
@@ -75,6 +78,20 @@ public class IntakeStore {
             (row.getSide() == 'A' ? teamA : teamB).add(row.getId());
         }
         return new MatchView(matchId, teamA, teamB);
+    }
+
+    /** Every queued entry as its join, with its original queue time. Two queries however many entries. */
+    @Transactional(readOnly = true)
+    public List<EntryQueued> queuedEntries() {
+        Map<UUID, List<UUID>> members = new HashMap<>();
+        for (PlayerRow row : players.findByEntryIdIsNotNull()) {
+            members.computeIfAbsent(row.getEntryId(), id -> new ArrayList<>()).add(row.getId());
+        }
+        List<EntryQueued> joins = new ArrayList<>();
+        for (EntryRow entry : entries.findAll()) {
+            joins.add(new EntryQueued(entry.getId(), members.get(entry.getId()), entry.getQueuedAt()));
+        }
+        return joins;
     }
 
     public boolean isQueued(UUID entryId) {

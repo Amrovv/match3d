@@ -13,6 +13,8 @@ public interface PlayerRepository extends JpaRepository<PlayerRow, UUID> {
 
     List<PlayerRow> findByMatchId(UUID matchId);
 
+    List<PlayerRow> findByEntryIdIsNotNull();
+
     /** Queues a player under the entry unless already queued, clearing any match or refusal. 1 if claimed. */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
