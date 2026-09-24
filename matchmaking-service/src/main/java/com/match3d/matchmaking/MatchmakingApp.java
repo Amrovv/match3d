@@ -11,9 +11,11 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /** Starts matchmaking. One engine per process, shared by the consumer and the runner. */
 @SpringBootApplication
+@EnableScheduling
 public class MatchmakingApp {
 
     public static void main(String[] args) {
@@ -36,8 +38,8 @@ public class MatchmakingApp {
     }
 
     @Bean
-    RatingStore ratingStore() {
-        return new RatingStore();
+    RatingStore ratingStore(PlayerRepository players) {
+        return new RatingStore(players);
     }
 
     @Bean
@@ -46,8 +48,14 @@ public class MatchmakingApp {
     }
 
     @Bean
-    MatchHistory matchHistory() {
-        return new MatchHistory();
+    MatchHistory matchHistory(MatchRepository matches, PlayerMatchRepository playerMatches) {
+        return new MatchHistory(matches, playerMatches);
+    }
+
+    @Bean
+    MatchResults matchResults(MatchRepository matches, PlayerMatchRepository playerMatches,
+                              PlayerRepository players, Clock clock) {
+        return new MatchResults(matches, playerMatches, players, clock);
     }
 
     @Bean

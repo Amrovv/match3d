@@ -1,105 +1,180 @@
 package com.match3d.intake;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
 
+import com.match3d.common.EntryAccepted;
 import com.match3d.common.EntryMatched;
+import com.match3d.common.EntryQueued;
 import com.match3d.common.EntryRejected;
+import com.match3d.common.EventJson;
+import com.match3d.common.WaitBand;
+import com.match3d.common.MatchEnded;
+import com.match3d.common.MatchmakingAlive;
+import com.match3d.common.MatchmakingStarted;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** What intake does with what matchmaking sends back, called directly, no broker. */
-class ResultListenerTest {
+/** What intake does with what matchmaking sends back, called directly over Postgres, no broker. */
+class ResultListenerTest extends PostgresTest {
 
-    private final QueueRegistry registry = new QueueRegistry();
-    private final MatchBoard board = new MatchBoard();
-    private final RejectionBoard rejections = new RejectionBoard();
-    private final ResultListener listener = new ResultListener(registry, board, rejections);
+    private static final Instant NOW = Instant.parse("2026-09-24T12:00:00Z");
 
-    /** A party of the given size, queued, and the entry id it queued under. */
-    private UUID queueParty(int size) {
-        UUID entry = UUID.randomUUID();
-        List<UUID> members = java.util.stream.Stream.generate(UUID::randomUUID).limit(size).toList();
-        registry.tryQueue(entry, members);
-        return entry;
+    @Autowired private IntakeStore store;
+    private final FakePublisher publisher = new FakePublisher();
+    private ResultListener listener;
+
+    @BeforeEach void wire() {
+        listener = new ResultListener(store, publisher);
     }
 
-    /** A solo, queued under their own id. */
+    private List<UUID> queueParty(UUID entryId, int size) {
+        List<UUID> members = Stream.generate(UUID::randomUUID).limit(size).toList();
+        store.join(entryId, members, NOW);
+        return members;
+    }
+
     private UUID queueSolo() {
         UUID player = UUID.randomUUID();
-        registry.tryQueue(player, List.of(player));
+        store.join(player, List.of(player), NOW);
         return player;
     }
 
-    @Test void testAMatchIsRecordedAgainstEveryPlayerPos() {
-        UUID party = queueParty(3);
-        List<UUID> partyMembers = registry.membersOf(party);
-        UUID solo = queueSolo();
-
-        listener.onMatched(new EntryMatched(UUID.randomUUID(), List.of(party), List.of(solo)));
-
-        for (UUID player : partyMembers) {
-            assertNotNull(board.matchOf(player), "Every player of a matched party can see the match");
-        }
-        assertEquals(board.matchOf(solo), board.matchOf(partyMembers.get(0)), "Both sides share one match");
+    private StatusResponse status(UUID player) {
+        return store.status(player);
     }
 
     @Test void testTeamsAreKeptApartAsPlayers() {
-        UUID party = queueParty(2);
-        List<UUID> partyMembers = registry.membersOf(party);
+        UUID party = UUID.randomUUID();
+        List<UUID> members = queueParty(party, 2);
         UUID solo = queueSolo();
         UUID matchId = UUID.randomUUID();
 
         listener.onMatched(new EntryMatched(matchId, List.of(party), List.of(solo)));
-        MatchView view = board.matchOf(solo);
+        MatchView view = status(solo).match();
 
         assertEquals(matchId, view.matchId(), "The match keeps its id");
-        assertEquals(partyMembers, view.teamA(), "Team A is the party's members, not its entry id");
+        assertEquals(members.stream().sorted().toList(), view.teamA().stream().sorted().toList(),
+                "Team A is the party's members, not its entry id");
         assertEquals(List.of(solo), view.teamB(), "Team B is the solo");
+        assertEquals(view.matchId(), status(members.get(0)).match().matchId(), "Every player sees the same match");
+        assertFalse(store.isQueued(party), "A matched entry is no longer queued");
     }
 
-    @Test void testMatchedEntriesAreFreedToQueueAgain() {
-        UUID party = queueParty(4);
-        List<UUID> partyMembers = registry.membersOf(party);
-
-        listener.onMatched(new EntryMatched(UUID.randomUUID(), List.of(party), List.of()));
-
-        assertFalse(registry.contains(party), "A matched entry is no longer queued");
-        partyMembers.forEach(m -> assertNull(registry.entryOf(m), "Nor are its members"));
-    }
-
-    @Test void testAnEntryIntakeNoLongerHoldsIsSkipped() {
-        // The party left just before the lobby formed, so intake has already
-        // forgotten it. The rest of the lobby must still be recorded.
-        UUID left = UUID.randomUUID();
-        UUID solo = queueSolo();
-
-        listener.onMatched(new EntryMatched(UUID.randomUUID(), List.of(left), List.of(solo)));
-
-        assertEquals(List.of(), board.matchOf(solo).teamA(), "An unknown entry contributes no players");
-        assertEquals(List.of(solo), board.matchOf(solo).teamB(), "The rest of the lobby is still recorded");
-    }
-
-    @Test void testASpreadRejectionIsKeptAndTheEntryForgotten() {
-        UUID party = queueParty(2);
-        List<UUID> partyMembers = registry.membersOf(party);
+    @Test void testRefusalIsKeptAndTheEntryForgotten() {
+        UUID party = UUID.randomUUID();
+        List<UUID> members = queueParty(party, 2);
 
         listener.onRejected(new EntryRejected(party, EntryRejected.Reason.SPREAD_TOO_WIDE));
 
-        partyMembers.forEach(m -> assertEquals(EntryRejected.Reason.SPREAD_TOO_WIDE, rejections.reasonFor(m),
+        members.forEach(m -> assertEquals(EntryRejected.Reason.SPREAD_TOO_WIDE, status(m).reason(),
                 "Each member can be told why their join was refused"));
-        assertFalse(registry.contains(party), "The entry was never queued in matchmaking, so intake drops it");
+        assertFalse(store.isQueued(party), "Never queued in matchmaking, so intake drops it");
+    }
+
+    @Test void testUnknownPlayerRefusalHandledAlike() {
+        UUID solo = queueSolo();
+
+        listener.onRejected(new EntryRejected(solo, EntryRejected.Reason.UNKNOWN_PLAYER));
+
+        assertEquals(EntryRejected.Reason.UNKNOWN_PLAYER, status(solo).reason());
     }
 
     @Test void testADuplicateRejectionChangesNothing() {
-        // Almost always a redelivered message, so the entry really is queued.
+        // Almost always a redelivered message or a resent join, so the entry really is queued.
         UUID solo = queueSolo();
 
         listener.onRejected(new EntryRejected(solo, EntryRejected.Reason.DUPLICATE));
 
-        assertTrue(registry.contains(solo), "A duplicate must not drop an entry that is genuinely queued");
-        assertNull(rejections.reasonFor(solo), "And nothing to report to the player");
+        assertEquals(StatusResponse.State.QUEUED, status(solo).state(),
+                "A duplicate must not drop an entry that is genuinely queued");
+    }
+
+    @Test void testMatchEndedMessageFreesThePlayers() {
+        UUID solo = queueSolo();
+        UUID other = queueSolo();
+        UUID matchId = UUID.randomUUID();
+        listener.onMatched(new EntryMatched(matchId, List.of(solo), List.of(other)));
+
+        MessageProperties props = new MessageProperties();
+        props.setType("MatchEnded");
+        listener.onMessage(new Message(EventJson.toBytes(new MatchEnded(matchId)), props));
+
+        assertEquals(StatusResponse.State.NOT_QUEUED, status(solo).state(), "Routed by type to the store");
+        assertEquals(StatusResponse.State.NOT_QUEUED, status(other).state());
+    }
+
+    private void deliver(String type, Object event) {
+        MessageProperties props = new MessageProperties();
+        props.setType(type);
+        listener.onMessage(new Message(EventJson.toBytes(event), props));
+    }
+
+    @Test void testAcceptedAndAliveMessagesGiveAnEstimate() {
+        UUID solo = queueSolo();
+
+        deliver("EntryAccepted", new EntryAccepted(solo, 2500));
+        deliver("MatchmakingAlive", new MatchmakingAlive(NOW, List.of(new WaitBand(25, 42, 1))));
+
+        assertEquals(StatusResponse.Matchmaking.UP, status(solo).matchmaking(), "Routed by type to the store");
+        assertEquals(42L, status(solo).estimatedWaitSeconds());
+    }
+
+    @Test void testUnknownMessageTypeThrows() {
+        MessageProperties props = new MessageProperties();
+        props.setType("EntryTeleported");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> listener.onMessage(new Message("{}".getBytes(StandardCharsets.UTF_8), props)));
+    }
+
+    @Test void testRestartRequeuesWhatIsStillQueued() {
+        UUID party = UUID.randomUUID();
+        List<UUID> members = queueParty(party, 3);
+        UUID solo = queueSolo();
+
+        listener.onStarted(new MatchmakingStarted(NOW.plusSeconds(600)));
+
+        List<EntryQueued> sent = publisher.published.stream().map(EntryQueued.class::cast).toList();
+        assertEquals(2, sent.size(), "Every queued entry is sent again");
+        EntryQueued partyJoin = sent.stream().filter(j -> j.entryId().equals(party)).findFirst().orElseThrow();
+        assertEquals(Set.copyOf(members), Set.copyOf(partyJoin.memberIds()), "With all its members");
+        assertEquals(NOW, partyJoin.queuedAt(), "And its original queue time, so it keeps its place");
+        assertTrue(sent.stream().anyMatch(j -> j.entryId().equals(solo)));
+    }
+
+    @Test void testRestartSkipsALobbyPublishedBeforeIt() {
+        UUID matchedSolo = queueSolo();
+        UUID other = queueSolo();
+        UUID waiting = queueSolo();
+        listener.onMatched(new EntryMatched(UUID.randomUUID(), List.of(matchedSolo), List.of(other)));
+
+        listener.onStarted(new MatchmakingStarted(NOW));
+
+        assertEquals(List.of(new EntryQueued(waiting, List.of(waiting), NOW)), publisher.published,
+                "Only the entry still queued is sent; the matched ones were seen first on the same queue");
+    }
+
+    @Test void testRestartWithNothingQueuedSendsNothing() {
+        listener.onStarted(new MatchmakingStarted(NOW));
+
+        assertTrue(publisher.published.isEmpty(), "A first start finds an empty table");
+    }
+
+    @Test void testRestartWithBrokerDownDoesNotThrow() {
+        queueSolo();
+        publisher.down = true;
+
+        assertDoesNotThrow(() -> listener.onStarted(new MatchmakingStarted(NOW)), "Logged as stranded instead");
     }
 }

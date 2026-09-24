@@ -2,7 +2,7 @@ package com.match3d.core;
 
 /**
  * Whether every player in a set accepts every other, in four numbers. minR and
- * maxR span the seated ratings; floor and ceiling are the narrowest reach among
+ * maxR span the placed ratings; floor and ceiling are the narrowest reach among
  * them. Valid while the reach covers the span.
  *
  * That is the pairwise condition without the pairs, because an interval is

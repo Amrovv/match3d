@@ -1,7 +1,10 @@
 package com.match3d.matchmaking;
 
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
@@ -10,6 +13,7 @@ import java.util.concurrent.TimeUnit;
 import com.match3d.common.EntryMatched;
 import com.match3d.core.Lobby;
 import com.match3d.core.MatchMaker;
+import com.match3d.core.Party;
 import com.match3d.core.Player;
 import com.match3d.core.SkillIndex;
 
@@ -89,32 +93,53 @@ public class MatchRunner {
         }
     }
 
-    /** Passes until one comes back empty. Skipped below ten players, when none can succeed. */
+    /**
+     * Passes until one comes back empty. Skipped below ten players, when none
+     * can succeed. Stops on a failed announce, or it would reform the same
+     * lobby at once while the broker is down.
+     */
     void runPasses() {
         while (index.playerCount() >= LOBBY_PLAYERS) {
             Optional<Lobby> lobby = matcher.formLobby(clock.instant());
             if (lobby.isEmpty()) return;
-            announce(lobby.get());
+            if (!announce(lobby.get())) return;
         }
     }
 
     /**
-     * Records the match and tells intake. If the publish fails or the process
-     * dies first, the lobby is lost while intake still holds its entries.
+     * Records the match and tells intake. If the publish fails, the match is
+     * removed and its entries go back to the engine with their original queue
+     * times, as if it never formed. If the process dies first, intake requeues
+     * them on restart and the recorded match is never resulted.
      */
-    void announce(Lobby lobby) {
+    boolean announce(Lobby lobby) {
         UUID matchId = UUID.randomUUID();
-        history.record(new MatchRecord(matchId, clock.instant(), ids(lobby.teamA()), ids(lobby.teamB())));
+        history.record(matchId, clock.instant(), lobby);
 
         List<UUID> teamA = entries(lobby.teamA());
         List<UUID> teamB = entries(lobby.teamB());
-        publisher.publish(new EntryMatched(matchId, teamA, teamB));
+        try {
+            publisher.publish(new EntryMatched(matchId, teamA, teamB));
+        } catch (RuntimeException e) {
+            log.warn("Lobby {} not announced, returning its entries to the engine", matchId, e);
+            history.forget(matchId);
+            requeue(lobby);
+            return false;
+        }
         teamA.forEach(book::forget);
         teamB.forEach(book::forget);
+        return true;
     }
 
-    private static List<UUID> ids(List<Player> players) {
-        return players.stream().map(Player::id).toList();
+    /** Rebuilds each entry from its members: a solo as itself, a party whole under its entry id. */
+    private void requeue(Lobby lobby) {
+        Map<UUID, List<Player>> byEntry = new LinkedHashMap<>();
+        for (Player p : lobby.members()) {
+            byEntry.computeIfAbsent(book.entryOf(p.id()), id -> new ArrayList<>()).add(p);
+        }
+        byEntry.forEach((entryId, members) -> matcher.enqueue(members.size() == 1
+                ? members.get(0)
+                : Party.of(entryId, members, members.get(0).queuedAt())));
     }
 
     /** Members of a party share one entry, so each entry appears once. */

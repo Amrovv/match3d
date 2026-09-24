@@ -86,7 +86,7 @@ class PartyTest {
 
         assertThrows(IllegalArgumentException.class,
                 () -> new Party(UUID.randomUUID(), members, BASE, 1500),
-                "A party with nobody in it cannot be rated or seated");
+                "A party with nobody in it cannot be rated or placed");
     }
 
     @Test void testSixMembersNeg() {
@@ -104,7 +104,7 @@ class PartyTest {
 
     @Test void testSizeIsTheMemberCount() {
         assertEquals(3, party(1400, 1500, 1600).size(),
-                "Size is the seats the party takes, which is how many people it holds");
+                "Size is the slots the party takes, which is how many people it holds");
     }
 
     // spread

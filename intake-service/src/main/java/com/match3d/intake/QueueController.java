@@ -9,7 +9,6 @@ import java.util.UUID;
 
 import com.match3d.common.EntryLeft;
 import com.match3d.common.EntryQueued;
-import com.match3d.common.EntryRejected;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -22,9 +21,9 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * The queue endpoints: join, leave, and a player's status.
  *
- * Join records before it publishes, so a double click is refused, and undoes
- * the record if the broker is down. Leave publishes before it forgets, so
- * intake never drops an entry matchmaking still holds.
+ * Join records before it publishes and undoes the record if the broker is
+ * down. A retried join resends the entry it already made. Leave publishes
+ * before it forgets, so intake never drops an entry matchmaking still holds.
  */
 @RestController
 public class QueueController {
@@ -35,24 +34,20 @@ public class QueueController {
      */
     private static final int MAX_MEMBERS = 5;
 
-    private final QueueRegistry registry;
+    private final IntakeStore store;
     private final EventPublisher publisher;
     private final Clock clock;
-    private final RejectionBoard rejections;
-    private final MatchBoard board;
 
-    public QueueController(QueueRegistry registry, EventPublisher publisher, Clock clock,
-                           RejectionBoard rejections, MatchBoard board) {
-        this.registry = registry;
+    public QueueController(IntakeStore store, EventPublisher publisher, Clock clock) {
+        this.store = store;
         this.publisher = publisher;
         this.clock = clock;
-        this.rejections = rejections;
-        this.board = board;
     }
 
     /**
      * 202 with the entry id, 400 for anything but 1 to 5 distinct ids, 409 if
-     * anyone listed is already queued, 503 if the broker is down.
+     * anyone listed is queued in another entry, 503 if the broker is down. The
+     * same members again get their existing entry, published again.
      */
     @PostMapping("/queue/join")
     public ResponseEntity<?> join(@RequestBody JoinRequest request) {
@@ -69,18 +64,21 @@ public class QueueController {
             entryId = UUID.randomUUID();
         }
 
-        if (!registry.tryQueue(entryId, members)) {
+        IntakeStore.Joined joined;
+        try {
+            joined = store.join(entryId, members, Instant.now(clock));
+        } catch (AlreadyQueuedException e) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body("a member of the party is already queued");
         }
-        rejections.clear(members);
 
         try {
-            publisher.publish(new EntryQueued(entryId, members, Instant.now(clock)));
+            publisher.publish(new EntryQueued(joined.entryId(), members, joined.queuedAt()));
         } catch (UncheckedIOException e) {
-            registry.remove(entryId);
+            // A resent entry was queued before this request, so it stays.
+            if (!joined.resent()) store.forget(joined.entryId());
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("service unavailable");
         }
-        return ResponseEntity.accepted().body(new JoinResponse(entryId));
+        return ResponseEntity.accepted().body(new JoinResponse(joined.entryId()));
     }
 
     /**
@@ -95,7 +93,7 @@ public class QueueController {
             return ResponseEntity.badRequest().body("an entry id is required");
         }
 
-        if (!registry.contains(entryId)) {
+        if (!store.isQueued(entryId)) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body("no entry queued under that id");
         }
 
@@ -105,22 +103,13 @@ public class QueueController {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("service unavailable");
         }
 
-        registry.remove(entryId);
+        store.forget(entryId);
         return ResponseEntity.accepted().build();
     }
 
     /** What this player is doing now: queued, matched, refused, or none of those. */
     @GetMapping("/queue/status/{playerId}")
     public StatusResponse status(@PathVariable UUID playerId) {
-        UUID entryId = registry.entryOf(playerId);
-        if (entryId != null) return StatusResponse.queued(entryId);
-
-        MatchView match = board.matchOf(playerId);
-        if (match != null) return StatusResponse.matched(match);
-
-        EntryRejected.Reason reason = rejections.reasonFor(playerId);
-        if (reason != null) return StatusResponse.refused(reason);
-
-        return StatusResponse.notQueued();
+        return store.status(playerId);
     }
 }

@@ -119,7 +119,7 @@ public final class MatchMaker {
      * ten are still queued at that moment. A member taken by another worker in
      * between is replaced and the lobby verified again.
      *
-     * The budget is the seats standing at the first failed verify, so a nearly
+     * The budget is the slots standing at the first failed verify, so a nearly
      * complete lobby is worth more persistence than a bare one. It is set once,
      * since recomputing it from a later, fuller selection would let it grow and
      * the loop would not terminate.
@@ -159,7 +159,7 @@ public final class MatchMaker {
                     // the selection's state and this is a snapshot of them.
                     List<QueueEntry> members = selection.members();
 
-                    if (seats(members) < LOBBY_SIZE) {
+                    if (slots(members) < LOBBY_SIZE) {
                         if (selection.turnedAway()) strandedCooldowns++;
                         else starvationCooldowns++;
                         cool(anchor, now);
@@ -176,7 +176,7 @@ public final class MatchMaker {
                     }
 
                     if (budget < 0) {
-                        budget = seats(members) - seats(missing);
+                        budget = slots(members) - slots(missing);
                     }
                     if (budget == 0) {
                         contentionCooldowns++;
@@ -226,7 +226,7 @@ public final class MatchMaker {
     }
 
     /**
-     * Under the lock. Seated entries no longer queued, empty if all survive.
+     * Under the lock. Placed entries no longer queued, empty if all survive.
      * Skips the anchor, who was claimed out of the index at poll.
      */
     private List<QueueEntry> missing(List<QueueEntry> members) {
@@ -244,7 +244,7 @@ public final class MatchMaker {
             heap.remove(member.id());
             index.remove(member);
         }
-        // Only the anchor, seated first, is in flight.
+        // Only the anchor, placed first, is in flight.
         inFlight.remove(members.get(0).id());
         // A member may be cooling. Left in, drainCooled would hand them back.
         cooling.removeIf(pending -> members.contains(pending.entry()));
@@ -262,7 +262,7 @@ public final class MatchMaker {
      *
      * The window is seeded once, in the constructor, and that seeding is the
      * expensive part of a pass: it touches every occupied rating in the window,
-     * where seating a player costs a logarithm in the bucket count. Rebuilding
+     * where placing a player costs a logarithm in the bucket count. Rebuilding
      * it for every retry would make a retry cost what a whole fresh pass costs,
      * so the cursor is kept and the walk resumes where it stopped.
      *
@@ -308,9 +308,9 @@ public final class MatchMaker {
             this.overlap = Overlap.of(anchor, anchorRadius);
         }
 
-        /** Seats candidates until both sides are full or the window is spent. */
+        /** Places candidates until both sides are full or the window is spent. */
         void fill() {
-            while (seats(teamA) + seats(teamB) < LOBBY_SIZE && cursor.hasNext()) {
+            while (slots(teamA) + slots(teamB) < LOBBY_SIZE && cursor.hasNext()) {
                 QueueEntry candidate = cursor.next();
                 if (teamA.contains(candidate) || teamB.contains(candidate)) continue;
 
@@ -332,12 +332,12 @@ public final class MatchMaker {
          * The first side that can take this entry whole, or null if neither
          * can. A party is never split across the two, so counting to ten
          * rather than to five and five would form lobbies that cannot be
-         * played: three parties of three and a solo fill every seat and no
+         * played: three parties of three and a solo fill every slot and no
          * subset of them adds up to a side.
          */
         private List<QueueEntry> sideWithRoomFor(QueueEntry candidate) {
-            if (seats(teamA) + candidate.size() <= TEAM_SIZE) return teamA;
-            if (seats(teamB) + candidate.size() <= TEAM_SIZE) return teamB;
+            if (slots(teamA) + candidate.size() <= TEAM_SIZE) return teamA;
+            if (slots(teamB) + candidate.size() <= TEAM_SIZE) return teamB;
             return null;
         }
 
@@ -387,12 +387,12 @@ public final class MatchMaker {
         return WideningFunction.ratingRadius(waited.isNegative() ? Duration.ZERO : waited);
     }
 
-    /** The consent state of a seated group, folded from scratch. */
-    private Overlap overlapOf(List<QueueEntry> seated, Instant now) {
-        QueueEntry first = seated.get(0);
+    /** The consent state of a placed group, folded from scratch. */
+    private Overlap overlapOf(List<QueueEntry> placed, Instant now) {
+        QueueEntry first = placed.get(0);
         Overlap overlap = Overlap.of(first, radiusOf(first, now));
 
-        for (QueueEntry entry : seated.subList(1, seated.size())) {
+        for (QueueEntry entry : placed.subList(1, placed.size())) {
             overlap = overlap.extendedBy(entry, radiusOf(entry, now));
         }
         return overlap;
@@ -405,16 +405,16 @@ public final class MatchMaker {
         }
     }
 
-    /** Seats these entries take, since a party takes more than one. */
-    private static int seats(List<QueueEntry> entries) {
-        int seats = 0;
+    /** Slots these entries take, since a party takes more than one. */
+    private static int slots(List<QueueEntry> entries) {
+        int slots = 0;
         for (QueueEntry entry : entries) {
-            seats += entry.size();
+            slots += entry.size();
         }
-        return seats;
+        return slots;
     }
 
-    /** The ten players inside the seated entries, the anchor's first. */
+    /** The ten players inside the placed entries, the anchor's first. */
     private static List<Player> playersIn(List<QueueEntry> entries) {
         List<Player> players = new ArrayList<>(LOBBY_SIZE);
         for (QueueEntry entry : entries) {

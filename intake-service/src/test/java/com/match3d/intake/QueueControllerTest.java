@@ -10,23 +10,31 @@ import com.match3d.common.EntryLeft;
 import com.match3d.common.EntryRejected;
 import com.match3d.common.EntryQueued;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** The controller called directly, no server and no broker, so the rules are tested alone. */
-class QueueControllerTest {
+/** The controller called directly over Postgres, no server and no broker. */
+class QueueControllerTest extends PostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-09-22T14:00:00Z");
 
-    private final QueueRegistry registry = new QueueRegistry();
+    @Autowired private IntakeStore store;
+
     private final FakePublisher publisher = new FakePublisher();
-    private final RejectionBoard rejections = new RejectionBoard();
-    private final MatchBoard board = new MatchBoard();
-    private final QueueController controller =
-            new QueueController(registry, publisher, Clock.fixed(NOW, ZoneOffset.UTC), rejections, board);
+    private QueueController controller;
+
+    @BeforeEach void wire() {
+        controller = new QueueController(store, publisher, Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private UUID entryOf(UUID player) {
+        return controller.status(player).entryId();
+    }
 
     private ResponseEntity<?> join(List<UUID> members) {
         return controller.join(new JoinRequest(members));
@@ -53,7 +61,7 @@ class QueueControllerTest {
         JoinResponse reply = (JoinResponse) join(members).getBody();
 
         assertFalse(members.contains(reply.entryId()), "A party's entry id is none of its members' ids");
-        assertEquals(reply.entryId(), registry.entryOf(members.get(0)), "The members are recorded under it");
+        assertEquals(reply.entryId(), entryOf(members.get(0)), "The members are recorded under it");
     }
 
     @Test void testBadSizesAreRefusedNeg() {
@@ -70,12 +78,33 @@ class QueueControllerTest {
         assertEquals(HttpStatus.BAD_REQUEST, join(List.of(twice, twice)).getStatusCode());
     }
 
-    @Test void testJoiningTwiceIsAConflictNeg() {
+    @Test void testJoiningTwiceResendsTheEntry() {
+        List<UUID> members = ids(2);
+        UUID party = ((JoinResponse) join(members).getBody()).entryId();
+
+        ResponseEntity<?> again = join(List.of(members.get(1), members.get(0)));
+
+        assertEquals(HttpStatus.ACCEPTED, again.getStatusCode(), "A retry is not refused");
+        assertEquals(new JoinResponse(party), again.getBody(), "It gets the entry it already has");
+        assertEquals(publisher.published.get(0), new EntryQueued(party, members, NOW));
+        assertEquals(party, ((EntryQueued) publisher.published.get(1)).entryId(), "And publishes it again");
+    }
+
+    @Test void testOverlappingAnotherEntryIsAConflictNeg() {
         UUID player = UUID.randomUUID();
         join(List.of(player));
 
-        assertEquals(HttpStatus.CONFLICT, join(List.of(player)).getStatusCode(), "Already queued");
-        assertEquals(1, publisher.published.size(), "The second join publishes nothing");
+        assertEquals(HttpStatus.CONFLICT, join(List.of(player, UUID.randomUUID())).getStatusCode());
+        assertEquals(1, publisher.published.size(), "The refused join publishes nothing");
+    }
+
+    @Test void testBrokerDownOnAResendKeepsTheEntry() {
+        UUID player = UUID.randomUUID();
+        join(List.of(player));
+        publisher.down = true;
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, join(List.of(player)).getStatusCode());
+        assertEquals(player, entryOf(player), "The entry predates this request, so it is not undone");
     }
 
     @Test void testBrokerDownIsUnavailableAndUndone() {
@@ -83,7 +112,7 @@ class QueueControllerTest {
         publisher.down = true;
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, join(List.of(player)).getStatusCode());
-        assertNull(registry.entryOf(player), "The record is undone, or the player would be stuck queued");
+        assertNull(entryOf(player), "The record is undone, or the player would be stuck queued");
 
         publisher.down = false;
         assertEquals(HttpStatus.ACCEPTED, join(List.of(player)).getStatusCode(), "So a retry succeeds");
@@ -101,7 +130,7 @@ class QueueControllerTest {
 
         assertEquals(HttpStatus.ACCEPTED, leave(player).getStatusCode(), "A queued entry can leave");
         assertEquals(new EntryLeft(player), publisher.published.get(1), "EntryLeft follows the EntryQueued");
-        assertNull(registry.entryOf(player), "The player is free again");
+        assertNull(entryOf(player), "The player is free again");
     }
 
     @Test void testAPartyLeavesByItsEntryIdPos() {
@@ -110,7 +139,7 @@ class QueueControllerTest {
 
         assertEquals(HttpStatus.ACCEPTED, leave(party).getStatusCode(),
                 "A party's entry id is no member's id, and it still finds the party");
-        members.forEach(m -> assertNull(registry.entryOf(m), "Every member is freed"));
+        members.forEach(m -> assertNull(entryOf(m), "Every member is freed"));
     }
 
     @Test void testLeavingWithoutAnIdIsABadRequestNeg() {
@@ -128,17 +157,18 @@ class QueueControllerTest {
         publisher.down = true;
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, leave(player).getStatusCode());
-        assertEquals(player, registry.entryOf(player),
+        assertEquals(player, entryOf(player),
                 "Matchmaking never heard, so intake must still hold the entry too");
     }
 
     @Test void testJoiningAgainClearsAnOldRefusal() {
         UUID player = UUID.randomUUID();
-        rejections.record(List.of(player), EntryRejected.Reason.SPREAD_TOO_WIDE);
+        join(List.of(player));
+        store.refused(player, EntryRejected.Reason.SPREAD_TOO_WIDE);
 
         join(List.of(player));
 
-        assertNull(rejections.reasonFor(player),
+        assertNull(controller.status(player).reason(),
                 "A refusal from a previous join must not follow a player who has queued again");
     }
 
@@ -160,18 +190,23 @@ class QueueControllerTest {
 
     @Test void testStatusOfAMatchedPlayerCarriesTheMatch() {
         UUID player = UUID.randomUUID();
-        MatchView match = new MatchView(UUID.randomUUID(), List.of(player), ids(5));
-        board.record(match);
+        UUID other = UUID.randomUUID();
+        join(List.of(player));
+        join(List.of(other));
+        UUID matchId = UUID.randomUUID();
+        store.matched(matchId, List.of(player), List.of(other));
 
         StatusResponse status = controller.status(player);
 
         assertEquals(StatusResponse.State.MATCHED, status.state());
-        assertEquals(match, status.match(), "The player can see their match and both teams");
+        assertEquals(new MatchView(matchId, List.of(player), List.of(other)), status.match(),
+                "The player can see their match and both teams");
     }
 
     @Test void testQueueingAgainOutranksAnOldMatch() {
         UUID player = UUID.randomUUID();
-        board.record(new MatchView(UUID.randomUUID(), List.of(player), ids(5)));
+        join(List.of(player));
+        store.matched(UUID.randomUUID(), List.of(player), List.of());
         join(List.of(player));
 
         assertEquals(StatusResponse.State.QUEUED, controller.status(player).state(),
@@ -180,7 +215,8 @@ class QueueControllerTest {
 
     @Test void testStatusReportsWhyAJoinWasRefused() {
         UUID player = UUID.randomUUID();
-        rejections.record(List.of(player), EntryRejected.Reason.SPREAD_TOO_WIDE);
+        join(List.of(player));
+        store.refused(player, EntryRejected.Reason.SPREAD_TOO_WIDE);
 
         StatusResponse status = controller.status(player);
 

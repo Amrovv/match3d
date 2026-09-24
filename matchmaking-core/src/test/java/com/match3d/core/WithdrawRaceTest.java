@@ -76,16 +76,16 @@ class WithdrawRaceTest {
 
             assertTrue(refused.isEmpty(), "Round " + r + ": a rejoin straight after a withdraw was refused");
 
-            Map<UUID, Integer> seated = new HashMap<>();
+            Map<UUID, Integer> placed = new HashMap<>();
             for (Lobby lobby : lobbies) {
                 for (Player p : lobby.members()) {
                     assertFalse(withdrawn.contains(p.id()),
                             "Round " + r + ": " + p.id() + " was withdrawn, then matched");
-                    seated.merge(p.id(), 1, Integer::sum);
+                    placed.merge(p.id(), 1, Integer::sum);
                 }
             }
             for (UUID id : rejoined) {
-                int places = seated.getOrDefault(id, 0) + (index.contains(id) ? 1 : 0);
+                int places = placed.getOrDefault(id, 0) + (index.contains(id) ? 1 : 0);
                 assertEquals(1, places, "Round " + r + ": " + id + " rejoined, then was lost or doubled");
             }
         }

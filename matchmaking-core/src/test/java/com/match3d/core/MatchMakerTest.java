@@ -110,7 +110,7 @@ class MatchMakerTest {
         members.forEach(member -> ids.add(member.id()));
 
         assertEquals(MatchMaker.LOBBY_SIZE, ids.size(),
-                "The anchor is seated once, not once as anchor and again as a candidate");
+                "The anchor is placed once, not once as anchor and again as a candidate");
     }
 
     @Test void testAnchorIsTheLongestWaiter() {
@@ -124,8 +124,8 @@ class MatchMakerTest {
         joinCluster(1000, 15);
 
         assertTrue(matcher.formLobby(NOW).isPresent(), "Fifteen candidates are more than enough");
-        assertEquals(5, index.entryCount(), "One attempt seats ten, it does not drain the queue");
-        assertEquals(5, heap.size(), "The heap keeps the five who were not seated");
+        assertEquals(5, index.entryCount(), "One attempt places ten, it does not drain the queue");
+        assertEquals(5, heap.size(), "The heap keeps the five who were not placed");
     }
 
     @Test void testFormsALobbyAcrossSeveralRatingsPos() {
@@ -163,7 +163,7 @@ class MatchMakerTest {
 
     @Test void testACandidateWhoCannotReachBackIsSkippedButTheLobbyStillFormsNeg() {
         // The outsider sits inside the anchor's window, so the query returns
-        // them and a one sided check would seat them. Their own radius reaches
+        // them and a one sided check would place them. Their own radius reaches
         // nowhere near 1500. They have also waited longer than the nine, so the
         // merge offers them first and the rejection has to happen mid walk
         // rather than at the end.
@@ -174,9 +174,9 @@ class MatchMakerTest {
         Lobby formed = matcher.formLobby(NOW).orElseThrow();
 
         assertEquals(MatchMaker.LOBBY_SIZE, formed.members().size(),
-                "Rejecting a candidate does not cost a seat, the walk carries on");
+                "Rejecting a candidate does not cost a slot, the walk carries on");
         assertFalse(formed.members().contains(outsider),
-                "The outsider accepts nobody in this lobby, so they cannot be seated in it");
+                "The outsider accepts nobody in this lobby, so they cannot be placed in it");
         assertTrue(heap.contains(outsider.id()), "A skipped candidate is still queued");
     }
 
@@ -223,7 +223,7 @@ class MatchMakerTest {
         // The anchor has waited an hour, so their window spans most of the
         // domain and every candidate falls inside it. The candidates have just
         // queued, so their own windows are the base radius and reach nowhere
-        // near the anchor. A one sided check would seat all ten.
+        // near the anchor. A one sided check would place all ten.
         join(1000, 3600);
         joinCluster(1500, 14);
 
@@ -240,12 +240,12 @@ class MatchMakerTest {
         MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
         selection.fill();
 
-        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "A full lobby was seated");
-        assertEquals(queued.get(0), selection.members().get(0), "The anchor is seated first");
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "A full lobby was placed");
+        assertEquals(queued.get(0), selection.members().get(0), "The anchor is placed first");
     }
 
     @Test void testSelectionResumesWhereItStoppedAfterADrop() {
-        // Twelve queued, ten seated, two dropped. The replacements have to come
+        // Twelve queued, ten placed, two dropped. The replacements have to come
         // from the two the cursor had not reached, which is only possible if the
         // walk resumes rather than starting the window again.
         List<Player> queued = joinCluster(1000, 12);
@@ -256,11 +256,11 @@ class MatchMakerTest {
         selection.drop(dropped);
         selection.fill();
 
-        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "The seats were refilled");
+        assertEquals(MatchMaker.LOBBY_SIZE, selection.members().size(), "The slots were refilled");
         assertTrue(selection.members().containsAll(queued.subList(10, 12)),
                 "The replacements are the two the cursor had not yet reached");
         dropped.forEach(gone -> assertFalse(selection.members().contains(gone),
-                "A dropped member is not seated again"));
+                "A dropped member is not placed again"));
     }
 
     @Test void testSelectionMembersIsASnapshotNotALiveView() {
@@ -288,11 +288,11 @@ class MatchMakerTest {
         MatchMaker.Selection selection = matcher.new Selection(queued.get(0), NOW);
         selection.fill();
 
-        assertEquals(9, selection.members().size(), "Nine willing players seat nine");
+        assertEquals(9, selection.members().size(), "Nine willing players fill nine slots");
     }
 
     @Test void testSelectionCannotReconsiderARejectedCandidate() {
-        // The outsider is rejected while the nine are seated, because they
+        // The outsider is rejected while the nine are placed, because they
         // reach nowhere near this cluster. Dropping members widens the reach,
         // but the cursor has already walked past them, so a resumed fill cannot
         // take them. This is the cost of resuming rather than re-seeding.
@@ -342,7 +342,7 @@ class MatchMakerTest {
     @Test void testACoolingPlayerCanStillBeRecruited() {
         // Cooldown bars a player from anchoring, not from being matched. The
         // tenth player arrives after the first attempt has failed, so the
-        // second attempt anchors on somebody else and seats the cooling player.
+        // second attempt anchors on somebody else and places the cooling player.
         List<Player> joined = joinCluster(1000, 9);
         Player failedAnchor = joined.get(0);
 
@@ -408,7 +408,7 @@ class MatchMakerTest {
         joinParty(1000, 4, 80);
         joinParty(1000, 4, 70);
 
-        assertEquals(Optional.empty(), matcher.formLobby(NOW), "Nine seated, one seat nobody fits");
+        assertEquals(Optional.empty(), matcher.formLobby(NOW), "Nine placed, one slot nobody fits");
         assertEquals(1, matcher.strandedCount(), "A party that would have played was turned away");
         assertEquals(0, matcher.starvationCount(), "Stranded and starved are counted apart");
     }
@@ -442,7 +442,7 @@ class MatchMakerTest {
         List<Player> joined = joinCluster(1000, 10);
 
         assertEquals(joined.get(0), matcher.formLobby(NOW).orElseThrow().teamA().get(0),
-                "The anchor is seated first, and the first side is filled first");
+                "The anchor is placed first, and the first side is filled first");
     }
 
     @Test void testAPartyLandsWhollyOnOneSidePos() {
@@ -456,18 +456,18 @@ class MatchMakerTest {
         assertEquals(3, onA, "Friends who queued together play together, never split across sides");
     }
 
-    @Test void testAPartySeatsEveryoneInIt() {
+    @Test void testAPartyPlacesEveryoneInIt() {
         Party party = joinParty(1000, 4, 100);
         joinCluster(1000, 6);
 
         Lobby lobby = matcher.formLobby(NOW).orElseThrow();
 
         assertTrue(lobby.members().containsAll(party.members()),
-                "A party is seated whole or not at all, so all four are in the lobby");
+                "A party is placed whole or not at all, so all four are in the lobby");
     }
 
     @Test void testThreeThreesAndASoloCannotFormALobbyNeg() {
-        // Ten seats and every consent check passes, but no subset of these
+        // Ten slots and every consent check passes, but no subset of these
         // adds up to a side, so counting to ten rather than to five and five
         // would form a lobby that cannot be played.
         joinParty(1000, 3, 100);
@@ -542,18 +542,18 @@ class MatchMakerTest {
 
     // fairness
 
-    @Test void testLongestWaitersAreSeatedFirst() {
+    @Test void testLongestWaitersArePlacedFirst() {
         List<Player> joined = joinCluster(1000, 20);
 
         List<Player> members = matcher.formLobby(NOW).orElseThrow().members();
 
         assertEquals(joined.subList(0, 10), members,
-                "The heap sets the anchor and the merge fills the seats, both by wait time,"
+                "The heap sets the anchor and the merge fills the slots, both by wait time,"
                         + " so a lobby is the ten who have waited longest");
     }
 
     @Test void testEveryCallShrinksTheHeap() {
-        // The termination argument for a caller loop: a call either seats ten
+        // The termination argument for a caller loop: a call either places ten
         // or cools one, so the heap is strictly smaller either way and a caller
         // never has to track what it has already tried.
         joinCluster(1000, 25);

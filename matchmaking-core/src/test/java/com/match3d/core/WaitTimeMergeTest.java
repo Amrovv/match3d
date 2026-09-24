@@ -134,7 +134,7 @@ class WaitTimeMergeTest {
     }
 
     @Test void testAgreesWithTheFairnessHeap() {
-        // The heap picks the anchor and the merge fills the seats, so the two
+        // The heap picks the anchor and the merge fills the slots, so the two
         // must never disagree about who has waited longest. Both read
         // QueueEntry.BY_WAIT_TIME, and this is what proves it.
         FairnessHeap heap = new FairnessHeap();
