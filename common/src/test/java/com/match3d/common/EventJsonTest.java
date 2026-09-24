@@ -45,6 +45,12 @@ class EventJsonTest {
         assertEquals(matched, roundTrip(matched, EntryMatched.class), "Both teams come back, in order");
     }
 
+    @Test void testMatchEndedSurvivesTheTrip() {
+        MatchEnded ended = new MatchEnded(UUID.randomUUID());
+
+        assertEquals(ended, roundTrip(ended, MatchEnded.class), "The id comes back");
+    }
+
     @Test void testTheInstantIsWrittenAsReadableText() {
         String json = new String(EventJson.toBytes(new EntryLeft(UUID.randomUUID())), StandardCharsets.UTF_8);
         String queued = new String(EventJson.toBytes(

@@ -102,4 +102,30 @@ class ResultListenerTest {
         assertTrue(registry.contains(solo), "A duplicate must not drop an entry that is genuinely queued");
         assertNull(rejections.reasonFor(solo), "And nothing to report to the player");
     }
+
+    @Test void testMatchEndedFreesEveryPlayer() {
+        UUID party = queueParty(2);
+        List<UUID> partyMembers = registry.membersOf(party);
+        UUID solo = queueSolo();
+        UUID matchId = UUID.randomUUID();
+        listener.onMatched(new EntryMatched(matchId, List.of(party), List.of(solo)));
+
+        board.end(matchId);
+
+        assertNull(board.matchOf(solo), "An ended match no longer shows");
+        partyMembers.forEach(m -> assertNull(board.matchOf(m), "For any player in it"));
+    }
+
+    @Test void testMatchEndedKeepsANewerMatch() {
+        UUID solo = queueSolo();
+        UUID first = UUID.randomUUID();
+        listener.onMatched(new EntryMatched(first, List.of(solo), List.of(queueSolo())));
+        registry.tryQueue(solo, List.of(solo));
+        UUID second = UUID.randomUUID();
+        listener.onMatched(new EntryMatched(second, List.of(solo), List.of(queueSolo())));
+
+        board.end(first);
+
+        assertEquals(second, board.matchOf(solo).matchId(), "Ending an old match leaves the current one");
+    }
 }

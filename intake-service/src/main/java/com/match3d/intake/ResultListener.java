@@ -3,6 +3,7 @@ package com.match3d.intake;
 import com.match3d.common.EntryMatched;
 import com.match3d.common.EntryRejected;
 import com.match3d.common.EventJson;
+import com.match3d.common.MatchEnded;
 import com.match3d.common.Queues;
 
 import org.springframework.amqp.core.Message;
@@ -40,6 +41,7 @@ public class ResultListener {
         switch (type) {
             case "EntryMatched" -> onMatched(EventJson.fromBytes(body, EntryMatched.class));
             case "EntryRejected" -> onRejected(EventJson.fromBytes(body, EntryRejected.class));
+            case "MatchEnded" -> board.end(EventJson.fromBytes(body, MatchEnded.class).matchId());
             default -> throw new IllegalArgumentException("Unknown event type " + type);
         }
     }
