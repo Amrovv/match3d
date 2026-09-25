@@ -8,17 +8,84 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Persistence and recovery](#persistence-and-recovery)
-2. [Two services over a queue](#two-services-over-a-queue)
-3. [Parties and teams](#parties-and-teams)
-4. [Matching under contention](#matching-under-contention)
-5. [Selecting a lobby](#selecting-a-lobby)
-6. [Fairness and waiting](#fairness-and-waiting)
-7. [Indexing players by skill](#indexing-players-by-skill)
-8. [The domain model](#the-domain-model)
-9. [Repository and build](#repository-and-build)
+1. [Containers and delivery](#containers-and-delivery)
+2. [Persistence and recovery](#persistence-and-recovery)
+3. [Two services over a queue](#two-services-over-a-queue)
+4. [Parties and teams](#parties-and-teams)
+5. [Matching under contention](#matching-under-contention)
+6. [Selecting a lobby](#selecting-a-lobby)
+7. [Fairness and waiting](#fairness-and-waiting)
+8. [Indexing players by skill](#indexing-players-by-skill)
+9. [The domain model](#the-domain-model)
+10. [Repository and build](#repository-and-build)
+
+## Containers and delivery
+
+### Images are tagged by commit and as latest
+
+**Options.** A version number, `latest` alone, the commit SHA alone, or the SHA and `latest` together.
+
+**Chosen.** Both. The SHA never moves and names exactly the code inside an image, so a deployment can name one precisely and a rollback names the one before it. Kubernetes replaces running containers only when the image it is given changes, which a tag reused for new builds never does. `latest` is for people pulling the newest build by hand. The version in the build has not changed since the first commit, so a version tag would overwrite one tag on every merge.
+
+**Cost.** A SHA is unreadable, and which image is newest has to be looked up. Two tags per image to keep straight.
+
+### Images publish to GHCR, from main only
+
+**Options.** Docker Hub or the GitHub Container Registry, publishing on every pull request or only on a merge to `main`.
+
+**Chosen.** GHCR, on merge. CI logs in with the token each workflow run is given, so there is no account to create and no password to store, and the images sit beside the code. Publishing waits for all four module jobs, so a failing `main` publishes nothing, and a pull request, unreviewed and possibly from a fork, never publishes.
+
+**Cost.** New packages start private and are made public once by hand. A broken Dockerfile is found only after merge, since pull requests never build images.
+
+### The end to end check runs from outside, in two phases
+
+**Options.** A Bash or PowerShell script calling the API, a JUnit test inside one of the services, or a JUnit test in a module of its own that knows only URLs.
+
+**Chosen.** A module of its own. It speaks only HTTP, so it checks what a client actually sees and runs unchanged against any deployment. Surviving a restart is checked by a second run reading the ids the first one wrote, because a restart means something different in Compose, Kubernetes and the cloud, and only a small wrapper per environment knows how to do one. Java rather than a script for real assertions and readable failures, in the language of the rest of the project.
+
+**Cost.** Two runs and a file between them, where a script could have been one. A JDK wherever it runs.
+
+### Compose starts with an empty database
+
+**Options.** Load the twenty seeded players in Compose, as the `local` profile does, or start empty.
+
+**Chosen.** Empty. A deployment should not ship with data in it, and the end to end check registers its own players through the API, so a fresh clone is still proven working in one command. The seed stays for running the services outside containers.
+
+**Cost.** Anyone trying the system by hand registers players first.
+
+### Services wait for healthy dependencies and restart on failure
+
+**Options.** Health checks with ordered startup, a restart policy alone, or both.
+
+**Chosen.** Both. Health checks make an ordinary start clean: the services start only once Postgres answers `pg_isready` and RabbitMQ answers a ping. The Postgres check goes over TCP because its first start runs a temporary server on a local socket only, which reports ready before the databases exist. The restart policy covers what startup order cannot, a dependency failing later. A restart policy alone reaches the same state through a run of crashes that bury real errors in the logs.
+
+**Cost.** Health checks guard startup only. The services have none of their own, so nothing waits on them.
+
+### Gradle's download cache is kept between image builds
+
+**Options.** Fetch dependencies in a layer of their own before the sources are copied, add a Gradle task that downloads every jar for that layer, or keep Gradle's cache on a BuildKit cache mount.
+
+**Chosen.** The mount. A layer of its own was built first, using Gradle's `dependencies` task, and cached nothing useful: that task resolves only the descriptions of libraries, so every source change downloaded all 70 jars again. The mount keeps Gradle's own cache between builds, outside the image, and Gradle checks it library by library, so a source change downloads nothing and a new dependency downloads only itself.
+
+**Cost.** The cache lives only on the machine that builds. CI starts with an empty one every run.
+
+### The runtime image is a Java runtime with a shell
+
+**Options.** A full JDK, a JRE on Ubuntu, a JRE on Alpine, or a distroless Java image.
+
+**Chosen.** A JRE on Ubuntu. A shell inside a running container is there to inspect its environment and reach its dependencies while the deployment is new, and Temurin is the same Java build CI already uses. Alpine's different C library occasionally breaks Java, and a JDK ships a compiler nothing uses. Distroless, with no shell and no package manager, is the choice once that debugging is no longer needed.
+
+**Cost.** The largest of the runtime images, carrying a shell and package manager an attacker could use. Startup time is the JVM's in every option.
 
 ## Persistence and recovery
+
+### A player's rating can be read back
+
+**Options.** Leave ratings visible only in the database, add them to each history entry, or expose each player's current rating.
+
+**Chosen.** The current rating, through `GET /players/{id}`. Nothing in the API returned a rating before, although ratings moving with results is one of the things the system is for, and the end to end check needs one to confirm a result moved it. It sits beside registration, reading back what `POST /players` created.
+
+**Cost.** History still leaves out the rating each player had going into a match, which `player_matches` holds.
 
 ### Estimates travel in the heartbeat
 
@@ -634,6 +701,8 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 
 **Cost.** Four build files to keep in step, and a tree that looks disproportionate to what it holds.
 
+**Amended.** A fifth module, `e2e-tests`, holds the end to end check. It depends on no other module.
+
 ### CI from the first commit
 
 **Options.** Build the pipeline at the end, or before any real logic.
@@ -643,6 +712,8 @@ Three consequences. Insert refuses a duplicate id whatever rating a second join 
 **Cost.** The pipeline proves very little for the first few commits.
 
 **Amended.** The single build job became one job per module once the services had code.
+
+**Amended.** On a push to `main`, a job per service now builds and publishes its image once every module job has passed.
 
 ### Feature branches and squash merges
 

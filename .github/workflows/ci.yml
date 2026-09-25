@@ -28,3 +28,45 @@ jobs:
 
       - name: Build and test
         run: ./gradlew :${{ matrix.module }}:build
+
+  images:
+    name: image (${{ matrix.image }})
+    # Only a merge to main publishes, and only once every module is green.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - module: intake-service
+            image: match3d-intake
+          - module: matchmaking-service
+            image: match3d-matchmaking
+    steps:
+      - uses: actions/checkout@v4
+
+      # Registry names must be lowercase; the owner is Amrovv.
+      - name: Image name
+        id: name
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The SHA says exactly which commit an image is; latest is for people.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.module }}/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.name.outputs.ref }}:${{ github.sha }}
+            ${{ steps.name.outputs.ref }}:latest

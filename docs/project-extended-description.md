@@ -6,19 +6,62 @@ Only built work appears here. New sections go at the top as they land, so the mo
 
 ## Contents
 
-1. [Persistence and recovery](#persistence-and-recovery)
-2. [Two services over a queue](#two-services-over-a-queue)
-3. [Parties and teams](#parties-and-teams)
-4. [Matching under contention](#matching-under-contention)
-5. [Forming a lobby](#forming-a-lobby)
-6. [The consent check](#the-consent-check)
-7. [The skill index](#the-skill-index)
-8. [Fairness and the widening window](#fairness-and-the-widening-window)
-9. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
-10. [The domain model](#the-domain-model)
-11. [Cost of each operation](#cost-of-each-operation)
-12. [Verification](#verification)
-13. [The build and the pipeline](#the-build-and-the-pipeline)
+1. [Containers and delivery](#containers-and-delivery)
+2. [Persistence and recovery](#persistence-and-recovery)
+3. [Two services over a queue](#two-services-over-a-queue)
+4. [Parties and teams](#parties-and-teams)
+5. [Matching under contention](#matching-under-contention)
+6. [Forming a lobby](#forming-a-lobby)
+7. [The consent check](#the-consent-check)
+8. [The skill index](#the-skill-index)
+9. [Fairness and the widening window](#fairness-and-the-widening-window)
+10. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
+11. [The domain model](#the-domain-model)
+12. [Cost of each operation](#cost-of-each-operation)
+13. [Verification](#verification)
+14. [The build and the pipeline](#the-build-and-the-pipeline)
+15. [Limitations](#limitations)
+
+## Containers and delivery
+
+Each service builds into an image of its own, and one Compose file runs both beside PostgreSQL and RabbitMQ, each in its own container. Every merge to `main` publishes both images.
+
+### The images
+
+Each Dockerfile has two stages. The first, on a full JDK, copies the Gradle wrapper, every module's build file and the sources the service needs, then runs `bootJar`. The second starts from `eclipse-temurin:21-jre`, a Java runtime on Ubuntu, and copies in only the jar, so the image carries no compiler, no Gradle and no source. Both build from the repository root, since intake needs `common`, and matchmaking needs `common` and `matchmaking-core`.
+
+Gradle's download cache sits on a BuildKit cache mount, a folder Docker keeps between builds outside every layer. A source change still reruns the build step, but Gradle finds every library it needs in that folder, so only compiling repeats. The folder never reaches the image.
+
+### Running it with Compose
+
+`docker compose up --build` starts four containers on one private network.
+
+| Container | Image | Reached from the host at |
+|---|---|---|
+| `postgres` | `postgres:17` | not published |
+| `rabbitmq` | `rabbitmq:4-management` | the dashboard, localhost:15672 |
+| `intake` | built from `intake-service/Dockerfile` | localhost:8080 |
+| `matchmaking` | built from `matchmaking-service/Dockerfile` | localhost:8081 |
+
+Inside the network a container is reached by its service name, and `localhost` means the container itself. So each service is given `SPRING_DATASOURCE_URL` and `SPRING_RABBITMQ_HOST` naming `postgres` and `rabbitmq`, which Spring reads over `application.properties`, and the same jar runs inside a container or out of one.
+
+Postgres keeps its data in the named volume `pgdata`, so stopping or removing the containers keeps every player and match, and `docker compose down -v` is what wipes it. The first start of an empty volume runs `docker/postgres/create-databases.sql`, creating one database per service. Each service then creates its tables through Flyway. Nothing is seeded: players are registered through `POST /players`, as any client would.
+
+The services start only once Postgres and RabbitMQ report healthy. Postgres is checked with `pg_isready` over TCP, because its first start runs a temporary server on a local socket only, which reports ready before the databases exist. RabbitMQ is checked with `rabbitmq-diagnostics ping`. A service that exits with an error is restarted, which covers a dependency failing after startup.
+
+### The end to end check
+
+`e2e-tests` is a module with no dependency on either service. It uses the running system over HTTP, the way any client would, in two phases.
+
+The flow phase registers ten new players and reads each back at 2500, queues a party of two and eight solos, and waits until intake reports every one matched. For each match it checks that intake and matchmaking report the same two teams, reports team A the winner, and gets 409 for a second result. It then waits for every player to read not queued, checks each rating is 2600 or 2400 by side, and checks each history holds the match. Players left queued by an earlier failed run can share a lobby with these, so each player's match is followed as found rather than assumed to be one lobby of ten. The phase ends by writing every player, rating and match it made to `e2e-tests/build/e2e/last-run.properties`.
+
+The after restart phase, `-PafterRestart`, reads that file and checks every player still has the same rating, history and status, every match still exists, and a result for each still gets 409. Run against a wiped database it fails on the first player.
+
+The test only knows two base URLs, `-Pintake` and `-Pmatchmaking`, defaulting to localhost, so it runs unchanged against any deployment. Restarting belongs to the deployment, not the test, so `scripts/e2e-compose.sh` wraps it for Compose: start the stack, wait until both services answer, run the flow, restart intake, matchmaking and Postgres, wait again, run the after restart phase. A normal build skips the module's tests, since it has no running system.
+
+### Publishing the images
+
+After a push to `main`, once every module's build has passed, CI builds both images and pushes them to the GitHub Container Registry as `ghcr.io/amrovv/match3d-intake` and `ghcr.io/amrovv/match3d-matchmaking`. Each is tagged twice: with the full commit SHA, which names exactly the code inside and never moves, and with `latest`, which moves to every new build. CI logs in with the token GitHub creates for each workflow run, so no password is stored anywhere. Pull requests build and test but never publish.
 
 ## Persistence and recovery
 
@@ -179,6 +222,7 @@ A lobby holds players, but intake names entries, so `EntryBook` maps each queued
 | Endpoint | Answers |
 |---|---|
 | `POST /players` | 201 for a new id at 2500, 409 if it exists, 400 with no id. |
+| `GET /players/{id}` | The player's id and current rating, or 404. |
 | `GET /matches/{id}` | The match, both teams as player ids and when it formed, or 404. |
 | `GET /players/{id}/history` | Every match the player was in, newest first, empty for a player never matched. |
 | `POST /matches/{id}/result` | 200 and the winner, from the body or a coin toss. 400 for a winner other than A or B, 404 for an unknown match, 409 if it already has a result. |
@@ -547,7 +591,7 @@ Derived from the structures, not measured. Every measured figure in this reposit
 
 ## Verification
 
-207 tests over the eleven core classes, plus a benchmark that reports rather than asserts. The services add 60 tests in `intake-service`, 47 in `matchmaking-service` and 11 in `common`. Both services test against a real Postgres started through Testcontainers, with the real migrations, one container shared by every test class, and without a broker, by publishing through an interface a test replaces. Each test runs in a transaction rolled back at its end, and the tests that must commit, the races, empty the tables when done. One more test in `common`, tagged `broker`, sends each event through a live RabbitMQ and back, and runs only on demand with `./gradlew :common:brokerTest`. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
+207 tests over the eleven core classes, plus a benchmark that reports rather than asserts. The services add 60 tests in `intake-service`, 49 in `matchmaking-service` and 11 in `common`. Both services test against a real Postgres started through Testcontainers, with the real migrations, one container shared by every test class, and without a broker, by publishing through an interface a test replaces. Each test runs in a transaction rolled back at its end, and the tests that must commit, the races, empty the tables when done. One more test in `common`, tagged `broker`, sends each event through a live RabbitMQ and back, and runs only on demand with `./gradlew :common:brokerTest`. Tests were checked by injecting the bug each exists to catch and confirming the suite goes red, one mutation at a time, reverted after each. Every guard in `Party` was mutated this way, and the party split check was confirmed by shuffling the ten players of each lobby before cutting them into teams, which it alone caught.
 
 One known gap. `formLobby` reads the selection's members afresh on every retry, because they are a snapshot of the two teams and go stale after a drop. Removing that re-read survives the suite, since reaching a retry needs another worker to take a member mid pass and no test can arrange that on demand. The effect would be wasted retries rather than a wrong lobby.
 
@@ -561,12 +605,44 @@ The database races are tested on separate connections, outside the test transact
 
 Both services were also run together against a real Postgres and RabbitMQ: a party and eight solos matched into one lobby that both services report alike, a result moving the five winners to 2600 and the losers to 2400, the estimate appearing once a match existed, an unknown player refused, status reading down within 30 seconds of stopping matchmaking, and a waiting entry requeued when it restarted.
 
+The whole system in containers is checked by the end to end test, run with `scripts/e2e-compose.sh` from an empty database: both phases pass, and the after restart phase was confirmed to fail once the volume was wiped between them.
+
 ## The build and the pipeline
 
-One Gradle build over four modules. `matchmaking-core` depends on nothing. `common` holds the types both services share. Both services depend on `common`, and `matchmaking-service` also on `matchmaking-core`. Nothing depends on a service, so the engine compiles and tests with no framework on the classpath.
+One Gradle build over five modules. `matchmaking-core` depends on nothing. `common` holds the types both services share. Both services depend on `common`, and `matchmaking-service` also on `matchmaking-core`. Nothing depends on a service, so the engine compiles and tests with no framework on the classpath. `e2e-tests` depends on no other module and speaks to the services over HTTP only.
+
+`.gitattributes` checks `gradlew` and every shell script out with Unix line endings on every machine. A Windows checkout otherwise converts them, and Linux, inside a container or in Git Bash, then cannot run them.
 
 Java 21 is pinned through the Gradle toolchain rather than assumed from the path, so the build resolves the same compiler locally and in CI. JUnit 5 is wired once at the root and inherited.
 
 Both services run on Spring Boot, with Spring AMQP for RabbitMQ and Spring Data JPA over Postgres, and Flyway migrating each database at startup. `common` holds the events and the one Jackson mapper both services read and write them through. The heartbeat and the sweeper are Spring scheduled tasks.
 
-CI runs on every push to `main` and every pull request, as one job per module, each running `./gradlew :<module>:build`, so each module reports its own check and one failure does not cancel the others. The service jobs start their Postgres through Docker on the runner. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
+CI runs on every push to `main` and every pull request, as one job per module, each running `./gradlew :<module>:build`, so each module reports its own check and one failure does not cancel the others. The service jobs start their Postgres through Docker on the runner. On a push to `main`, a further job per service builds its image and publishes it once all four module jobs pass, described under containers. Branch protection makes a green pull request the only way `main` moves, and the pull request template requires a trade offs section, so what was rejected is recorded at the time rather than reconstructed later.
+
+## Limitations
+
+The README lists the ones that matter most. This is all of them, by the part of the system they belong to.
+
+| Part | Limitation |
+|---|---|
+| Matching | The pass is greedy and anchored on the longest waiter, so it can miss a valid lobby that exists elsewhere in the queue. |
+| Matching | A lobby forms only when its entries fill two teams of exactly five, and a party is never split. Once solos run out, parties whose sizes cannot combine into fives wait until someone smaller joins. In a closed benchmark queue of 20k people, nine in ten of them in parties, 2000 were never matched. |
+| Matching | The widening curve's constants and the ten second cooldown are chosen, not derived. No player behaviour data exists to derive them from. |
+| Scaling | Every commit serialises through one lock, so the engine scales by making passes cheap rather than by running more of them. Sharding the queue by rating band is the next step and is not built. |
+| Scaling | Matching runs in one process. Several threads share one engine, but nothing coordinates two engines, so scaling matchmaking out is a design question rather than a configuration one. Intake already runs as any number of copies. |
+| Measurement | The benchmark measures throughput on a synthetic population. No latency or queue time figure is measured. |
+| Ratings | Ratings move a flat 100 per result, regardless of how strong the opponents were. An Elo style update is future work. |
+| Ratings | History does not show the rating a player had going into each match, although `player_matches` stores it. |
+| Recovery | If matchmaking dies between saving a match and publishing it, the players are requeued and matched again, and the saved match stays in their history, never resulted. |
+| Recovery | A lost `MatchEnded` leaves its players reading as matched until they queue again, with their ratings already moved. |
+| Recovery | A leave arriving while intake requeues after a matchmaking restart can leave an entry in the engine that intake has forgotten. |
+| Recovery | Matchmaking is reported down only after 30 seconds without a heartbeat, and a lost join is found by the sweeper only after about 40 seconds. |
+| Recovery | A message a service cannot handle is logged and dropped. There is no dead letter queue to keep it for inspection. |
+| Queue | A party refused for an unknown member is not told which member it was. |
+| Queue | Joining a party while already queued is refused rather than moving the player into it. |
+| Queue | Wait estimates count matched players only, since leavers are never recorded. They use rating bands of 100, so plus or minus 500 is approximate at its edges, and a party is estimated from solos and parties alike, which likely flatters it. |
+| Deployment | The system runs in Compose on one machine. Kubernetes and a cloud deployment are not built yet. |
+| Deployment | The Postgres password is in the repository, in `application.properties` and the Compose file. It suits a local setup only. |
+| Deployment | The runtime image keeps a shell for debugging, at the cost of size and of tools an attacker could use. A distroless Java image is the next step. |
+| Deployment | The services have no health endpoint, so Compose starts them without checking they are ready, and the end to end script decides they are up by asking each a question it can answer. |
+| Deployment | Each image build in CI downloads every library again, since nothing is cached between runs. |

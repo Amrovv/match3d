@@ -50,6 +50,19 @@ class PlayerControllerTest extends PostgresTest {
         assertEquals(HttpStatus.BAD_REQUEST, create(null));
     }
 
+    @Test void testGetReturnsCurrentRating() {
+        UUID id = UUID.randomUUID();
+        create(id);
+        rate(id, 3100);
+
+        PlayerResponse player = controller().player(id).getBody();
+        assertEquals(new PlayerResponse(id, 3100), player);
+    }
+
+    @Test void testGetUnknownNotFound() {
+        assertEquals(404, controller().player(UUID.randomUUID()).getStatusCode().value());
+    }
+
     /** Outside the test transaction, so each thread commits on its own connection. */
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
