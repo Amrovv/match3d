@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: match3d
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP: during first time setup Postgres listens on its socket only,
+      # so a socket check would pass before the databases exist.
+      test: ["CMD", "pg_isready", "-h", "localhost", "-U", "postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  intake:
+    build:
+      context: .
+      dockerfile: intake-service/Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/intake
+      SPRING_RABBITMQ_HOST: rabbitmq
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+  matchmaking:
+    build:
+      context: .
+      dockerfile: matchmaking-service/Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/matchmaking
+      SPRING_RABBITMQ_HOST: rabbitmq
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  pgdata:
