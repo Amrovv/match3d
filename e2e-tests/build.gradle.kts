@@ -44,3 +44,14 @@ tasks.register<Test>("replicaTest") {
     systemProperty("e2e.phase", "replicas")
     systemProperty("e2e.copies", providers.gradleProperty("copies").getOrElse("3"))
 }
+
+// ./gradlew :e2e-tests:disruptionTest: drives a flow while
+// scripts/e2e-minikube-disruption.sh kills an intake pod under it. The marker
+// file lets the script kill only once the load is under way.
+tasks.register<Test>("disruptionTest") {
+    description = "Checks the system stays up when an intake pod is killed under load."
+    group = "verification"
+    pointAtSystem()
+    systemProperty("e2e.phase", providers.gradleProperty("phase").getOrElse("crash"))
+    systemProperty("e2e.started", layout.buildDirectory.file("e2e/started").get().asFile.path)
+}
