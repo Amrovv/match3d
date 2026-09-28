@@ -8,16 +8,115 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 ## Contents
 
-1. [Containers and delivery](#containers-and-delivery)
-2. [Persistence and recovery](#persistence-and-recovery)
-3. [Two services over a queue](#two-services-over-a-queue)
-4. [Parties and teams](#parties-and-teams)
-5. [Matching under contention](#matching-under-contention)
-6. [Selecting a lobby](#selecting-a-lobby)
-7. [Fairness and waiting](#fairness-and-waiting)
-8. [Indexing players by skill](#indexing-players-by-skill)
-9. [The domain model](#the-domain-model)
-10. [Repository and build](#repository-and-build)
+1. [Running on Kubernetes](#running-on-kubernetes)
+2. [Containers and delivery](#containers-and-delivery)
+3. [Persistence and recovery](#persistence-and-recovery)
+4. [Two services over a queue](#two-services-over-a-queue)
+5. [Parties and teams](#parties-and-teams)
+6. [Matching under contention](#matching-under-contention)
+7. [Selecting a lobby](#selecting-a-lobby)
+8. [Fairness and waiting](#fairness-and-waiting)
+9. [Indexing players by skill](#indexing-players-by-skill)
+10. [The domain model](#the-domain-model)
+11. [Repository and build](#repository-and-build)
+
+## Running on Kubernetes
+
+### The cluster is minikube with three nodes
+
+**Options.** A hosted cluster from a cloud provider, the single node Kubernetes built into Docker Desktop, or minikube with several nodes.
+
+**Chosen.** minikube, three nodes. It simulates a multi server deployment on one machine at no cost, and its manifests carry over to a hosted cluster unchanged. Three nodes rather than one so the system runs as it would across several servers: copies of intake are spread one per node, and losing a node loses one copy, not all of them. A hosted cluster would add a cloud account, billing and network setup while showing the same behaviour, so it is left as future work.
+
+**Cost.** The three nodes share one machine, so a node stands in for a server rather than being a separate machine. Nothing here shows behaviour across a real network.
+
+### The database and broker run outside the cluster
+
+**Options.** Run PostgreSQL and RabbitMQ as pods in the cluster, as one stateful pod each or as three RabbitMQ brokers under its operator, or run both outside the cluster.
+
+**Chosen.** Outside. The cluster then holds only the two services, and the database and broker are independent of it, so moving either to a managed service changes only an address and a password. A stateful pod on minikube keeps its data in a folder on one node, so it could not move if that node stopped, and three brokers under an operator would bring real high availability along with more moving parts than the system needs. With both outside, stopping anything in the cluster only ever stops code written here.
+
+**Cost.** Both run as single instances on the same machine, and no test covers either one failing while the system runs on the cluster. Their availability is assumed.
+
+### Intake runs as three copies, one per node
+
+**Options.** One copy, several copies placed wherever the scheduler likes, or several copies spread across nodes.
+
+**Chosen.** Three, spread. Intake holds nothing in memory, so any copy serves any request, and several copies are what that design was for. A topology spread constraint places one copy per node, so a node going down takes one copy and the other two carry on. Updates start a new copy before stopping an old one, so there are never fewer than three.
+
+**Cost.** Every copy runs the sweeper, so an unconfirmed entry can be sent more than once, which the engine refuses as a duplicate. Each copy holds its own database connections.
+
+### Matchmaking runs as one copy, stopped before it is replaced
+
+**Options.** The default rolling update, a rolling update set to stop one pod before starting another, or the `Recreate` strategy.
+
+**Chosen.** `Recreate`. The engine's queue is one process's memory, and two engines reading the same queue would each see about half the joins and form lobbies from half the players. A default rolling update starts the new pod before stopping the old one, so for a moment two engines would run. A rolling update tuned to stop first does the same as `Recreate`, but hides the reason in two numbers, where `Recreate` states it.
+
+**Cost.** Every update or restart leaves a few seconds with no matching. That gap is one the system already survives, the same as a crash: players stay queued in intake and are sent again when the new pod announces itself. Matchmaking cannot scale out, which is a limitation of the engine's design, not of the cluster.
+
+### Health is reported through Actuator, with liveness kept apart from readiness
+
+**Options.** A health endpoint written by hand, a probe that only checks the port is open, or Spring Boot Actuator's health endpoints.
+
+**Chosen.** Actuator. It already knows how to check the database and the broker, and it separates the two questions Kubernetes asks. Liveness checks the process alone, since a failed liveness restarts the pod, and restarting every pod because the database is down fixes nothing and never stops. Readiness adds the database and RabbitMQ, so a pod that cannot do its job stops receiving requests and returns by itself once they recover. A port check was rejected because the port opens before Flyway has run and the listener is connected, so traffic would arrive early. Only health is exposed over HTTP.
+
+**Cost.** A database outage makes every pod unready at once, so the Service has nobody to send requests to. Requests then fail straight away rather than slowly, but the system is still down.
+
+### Settings in a ConfigMap, the password in a Secret made at setup
+
+**Options.** The password written in a manifest, a committed Secret file, or a Secret created by the setup script from an environment variable.
+
+**Chosen.** Created at setup. A committed Secret file is only encoded, not encrypted, so anyone reading the repository could decode it. The setup script creates the Secret from `DB_PASSWORD`, and the password was also taken out of both services' `application.properties`, so every environment supplies it: the Secret on the cluster, an environment variable under Compose, an export for a local run. Addresses are not secret, so they sit in a committed ConfigMap.
+
+**Cost.** Anyone running the system supplies the password. The throwaway local default `match3d` is still committed in the Compose file and the setup script, and Kubernetes stores Secrets unencrypted by default, which suits a local cluster only.
+
+### Plain manifests applied with kubectl
+
+**Options.** Helm charts, Kustomize overlays, or plain YAML applied with `kubectl apply -f k8s/`.
+
+**Chosen.** Plain YAML. There is one environment, and every line of the manifests is readable as written. Helm and Kustomize add templating and per environment overlays, which a single environment does not need.
+
+**Cost.** Nothing is templated, so a second environment means copying files and editing them, or converting to Kustomize then.
+
+### Images are built locally and loaded into the cluster
+
+**Options.** Pull the images CI publishes, run a registry inside minikube, or build locally and load each image into the nodes.
+
+**Chosen.** Build and load. CI publishes only merged commits, and the cluster has to test the branch as it stands. Each build gets a new tag, the short commit SHA plus a timestamp when there are uncommitted changes, because Kubernetes replaces pods only when the image it is given changes, and a reused tag would leave old code running. Each image is also loaded as `:dev`, the tag the manifests name, so applying them alone always finds an image.
+
+**Cost.** What runs on minikube was built locally, not by CI. Loading two images into three nodes takes a while on every build.
+
+### The services are reached through a LoadBalancer and minikube tunnel
+
+**Options.** `kubectl port-forward`, a NodePort Service, an Ingress, or a LoadBalancer Service.
+
+**Chosen.** LoadBalancer. The same Service type works unchanged on a hosted cluster, and on minikube `minikube tunnel` gives it an address, so intake answers on `localhost:8080` and matchmaking on `localhost:8081` exactly as under Compose, and every test runs unchanged. `port-forward` connects to a single pod, so it could never show requests spreading across copies. NodePort was used first and is not reachable from the host machine with minikube's Docker driver. An Ingress adds a controller and a routing layer that two services on two ports do not need.
+
+**Cost.** The tunnel has to run in its own terminal, with administrator rights, whenever the cluster is used.
+
+### Each intake response names the copy that served it
+
+**Options.** Have tests address each pod directly, or have intake name itself in a response header.
+
+**Chosen.** A header, `X-Intake-Pod`, set from the pod's name. Tests then go through the one Service address every client uses and can still count which copies took traffic. Addressing pods directly would skip the Service, which is the thing being tested. The Service spreads traffic per connection, so the tests that count copies open a fresh connection for each request.
+
+**Cost.** Pod names are visible to any client. Harmless here, and to be removed before any public deployment.
+
+### Copies are removed by scaling for the replica checks, and killed for the failure check
+
+**Options.** Remove copies by deleting pods, or by scaling the Deployment down.
+
+**Chosen.** Both, because they answer different questions. Scaling down to two and then one leaves a known, steady number of copies, so the replica checks can say exactly how many should answer and that none of the removed ones still does. Deleting a pod is what a crash looks like, and the failure check deletes one under load to show Kubernetes replacing it while no player is lost.
+
+**Cost.** Neither is a real node failure. Both act on pods, so a whole server going away is shown only through the spread constraint's placement, not by stopping a node under test.
+
+### New versions go out in a maintenance window
+
+**Options.** Prove a rolling update drops no request at all, or deploy in a maintenance window and prove the system survives a copy being killed under load.
+
+**Chosen.** A maintenance window. A rolling update with no failed request needs more than graceful shutdown: for a moment after a pod starts stopping, the Service can still route requests to it, and closing that gap takes a delay before shutdown plus a test counting every request, more machinery than the system's updates need. Both services now shut down gracefully, finishing requests in progress for up to 20 seconds, and the failure check proves the harsher case: a copy killed without warning under load costs a few retried requests and no player. A planned stop is gentler than a kill.
+
+**Cost.** No claim of updates without downtime. Intake's Deployment still updates one copy at a time, but whether that drops a request is untested, and clients have to retry a request that meets a dying copy.
 
 ## Containers and delivery
 
@@ -45,6 +144,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Cost.** Two runs and a file between them, where a script could have been one. A JDK wherever it runs.
 
+**Amended.** The same test now also runs against Kubernetes, through a wrapper that restarts pods with `kubectl`. The module gained two more tests, one for intake running as several copies and one for a copy killed under load, each with its own wrapper. `Http` now reads the `X-Intake-Pod` header and can send a request over a fresh connection.
+
 ### Compose starts with an empty database
 
 **Options.** Load the twenty seeded players in Compose, as the `local` profile does, or start empty.
@@ -60,6 +161,8 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 **Chosen.** Both. Health checks make an ordinary start clean: the services start only once Postgres answers `pg_isready` and RabbitMQ answers a ping. The Postgres check goes over TCP because its first start runs a temporary server on a local socket only, which reports ready before the databases exist. The restart policy covers what startup order cannot, a dependency failing later. A restart policy alone reaches the same state through a run of crashes that bury real errors in the logs.
 
 **Cost.** Health checks guard startup only. The services have none of their own, so nothing waits on them.
+
+**Amended.** The services now report their own health through Actuator, which Kubernetes uses to decide when a pod is ready and when to restart it. Compose still waits on PostgreSQL and RabbitMQ only.
 
 ### Gradle's download cache is kept between image builds
 
@@ -309,7 +412,7 @@ The cost line is not optional. A decision with no stated cost is either trivial 
 
 **Options.** A minimal web library with the plain RabbitMQ client, or Spring Boot with Spring AMQP.
 
-**Chosen.** Spring Boot. It is what most Java backends run on, and Spring AMQP takes care of connections, listener threads and message delivery that the plain client leaves to the caller. `RabbitTemplate` is safe across threads, so publishing needs no lock of its own.
+**Chosen.** Spring Boot. Spring AMQP takes care of connections, listener threads and message delivery that the plain client leaves to the caller. `RabbitTemplate` is safe across threads, so publishing needs no lock of its own.
 
 **Cost.** Much of the request path happens by annotation and auto configuration, so how a request reaches a handler is harder to follow than in a framework used as a library. Startup and images are heavier, which the container stages will pay for.
 

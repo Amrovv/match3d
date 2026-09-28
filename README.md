@@ -12,7 +12,7 @@
   <h3 align="center">Match3D</h3>
 
   <p align="center">
-    Match3D is a concurrent, skill based matchmaking engine that decides how much match quality is worth trading for a shorter queue. Split across two services that share nothing but a message queue.
+    Match3D is a concurrent, skill based matchmaking engine that decides how much match quality is worth trading for a shorter queue. It runs as a distributed system: two services that share nothing but a message queue, with the player facing side running as parallel copies across servers, packaged with Docker and orchestrated by Kubernetes.
     <br />
     <a href="docs/project-extended-description.md"><strong>How it works, in detail</strong></a>
     &middot;
@@ -27,7 +27,6 @@
   <ol>
     <li><a href="#about-the-project">About the project</a>
       <ul>
-        <li><a href="#project-status">Project status</a></li>
         <li><a href="#documentation">Documentation</a></li>
         <li><a href="#built-with">Built with</a></li>
       </ul>
@@ -35,7 +34,7 @@
     <li><a href="#architecture">Architecture</a></li>
     <li><a href="#getting-started">Getting started</a></li>
     <li><a href="#deployment">Deployment</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
+    <li><a href="#future-work">Future work</a></li>
     <li><a href="#limitations">Limitations</a></li>
     <li><a href="#contributing">Contributing</a></li>
     <li><a href="#license">License</a></li>
@@ -46,24 +45,21 @@
 
 ## About the project
 
-Match3D accepts players into a skill based queue, alone or in parties of up to five, and matches them into balanced lobbies of two teams of five. A party always plays together, on one team. The queue itself is not the point of focus, what the queue has to reconcile is. A player wants a lobby full of players at a similar rating to their own, but at the same time they want reasonable queue times. Those two aspects pull against one another, and the engine must decide and optimise how much match quality to trade for how much waiting.
+Matchmaking is split into two halves: parallel intake across servers, and one engine that decides how much match quality each second of waiting is worth, with nothing shared between them but a message queue. It balances the two things every player wants, a fast game and a fair one: each player's acceptable rating range starts narrow and widens the longer they wait, so solos and parties of up to five are formed into balanced teams of five without anyone waiting forever.
 
-The engine is a standalone module with no web framework and no network code, so it can be exercised and reasoned about on its own. Two services sit around it, coordinating only over a message queue.
-
-### Project status
-
-The core engine is built and tested: the skill index, the fairness heap and its widening window, the matching pass, the concurrency work that lets several threads run it against one shared queue, and parties queued as a single entry and placed on one team, covered by 207 tests and a benchmark. It runs behind two services: `intake-service` takes players in over REST, `matchmaking-service` runs the engine, and the two talk only over RabbitMQ. Each service keeps its state in a PostgreSQL database of its own, so intake can run as several copies, and either service can restart without stranding a player: a restarted matchmaking has intake send every queued entry again, lost joins are found and sent again, and a heartbeat tells queued players when matchmaking is down, alongside an estimate of their wait. Match results move ratings. The services add 120 tests, run against a real PostgreSQL. Each service builds into a Docker image, one `docker compose up` runs the whole system, an end to end test checks it from outside, and every merge to `main` publishes both images to the GitHub Container Registry. Kubernetes and a cloud deployment are not built yet. See the <a href="#roadmap">roadmap</a> for what is done and what is not.
+The engine is a standalone module with no web framework and no network code, so it can be exercised and reasoned about on its own. Around it sits a distributed system built to survive failure. Players arrive through `intake-service`, which runs as several interchangeable copies spread across servers, so any copy can crash without losing a single player. The engine runs in `matchmaking-service`, and the two coordinate only over RabbitMQ, so either can restart without losing anyone in the queue. Each service is a Docker image, and Kubernetes runs them across a simulated three server cluster, where losing a copy under load has been tested to cost no player.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ### Documentation
 
-Two longer documents sit in `docs/`, and this README is the summary of both.
+This README is the summary. The detail sits in `docs/`.
 
 | Document | Holds |
 |---|---|
-| [Extended description](docs/project-extended-description.md) | How each part of the system actually works, in the order it was built, including the API surface and the cost of every operation. |
+| [Extended description](docs/project-extended-description.md) | How each part of the system actually works, from the cluster down to the engine, including the API surface and the cost of every operation. |
 | [Design choices](docs/design-choices.md) | Every major design decision taken, explaining the choice, the trade offs, and the alternatives considered. |
+| [Running the system](docs/running-the-system.md) | Starting it with Compose or on Kubernetes, the full API, and running the tests and the benchmark. |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -78,9 +74,8 @@ Two longer documents sit in `docs/`, and this README is the summary of both.
 * [![Flyway][flyway-shield]][flyway-url]
 * [![Testcontainers][testcontainers-shield]][testcontainers-url]
 * [![Docker][docker-shield]][docker-url]
+* [![Kubernetes][kubernetes-shield]][kubernetes-url]
 * [![GitHub Actions][actions-shield]][actions-url]
-
-Planned, not yet in the build: Kubernetes, AWS.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -117,6 +112,8 @@ flowchart LR
 
 Players queue, leave and check their status through intake. Registering players, reporting results, and looking up a rating, a match or a player's history go to matchmaking directly. Intake and matchmaking never call each other: every join, leave, match and heartbeat travels as an event on RabbitMQ, and each service owns its database, which the other never reads.
 
+**Why it is split this way.** The two halves have opposite needs. Intake takes every player's requests and must never go down, so it keeps nothing in memory and runs as many copies. The engine must see the whole queue at once to match fairly, so it runs as one process. The queue between them lets either restart without the other losing anything. More in the [extended description](docs/project-extended-description.md#two-services-over-a-queue).
+
 | Direction | Events |
 |---|---|
 | intake to matchmaking | a player or party joined, an entry left |
@@ -124,13 +121,13 @@ Players queue, leave and check their status through intake. Registering players,
 
 The full list of events and what each carries is in the [extended description](docs/project-extended-description.md#the-events).
 
-| Module | Holds | Status |
-|---|---|---|
-| `matchmaking-core` | Domain model, parties, skill index, fairness heap, widening function, matching algorithm, concurrency | Built |
-| `common` | The eight events both services exchange, and their JSON mapping | Built |
-| `intake-service` | REST endpoints to join alone or as a party, leave, and read status, over its own database; the sweeper for unconfirmed entries | Built |
-| `matchmaking-service` | Consumes joins and leaves, runs the engine, records matches and ratings, takes results, sends the heartbeat | Built |
-| `e2e-tests` | Checks the running system from outside, over HTTP only, including that its data survives a restart | Built |
+| Module | Holds |
+|---|---|
+| `matchmaking-core` | Domain model, parties, skill index, fairness heap, widening function, matching algorithm, concurrency |
+| `common` | The eight events both services exchange, and their JSON mapping |
+| `intake-service` | REST endpoints to join alone or as a party, leave, and read status, over its own database; the sweeper for unconfirmed entries |
+| `matchmaking-service` | Consumes joins and leaves, runs the engine, records matches and ratings, takes results, sends the heartbeat |
+| `e2e-tests` | Checks the running system from outside, over HTTP only, under Compose or on Kubernetes: its data surviving a restart, intake as several copies, and a copy killed under load |
 
 `matchmaking-core` deliberately has no framework dependency. It is testable without starting a service, and matching decisions are made there rather than scattered across the two services, which is what makes this one system rather than two services stapled together.
 
@@ -138,12 +135,7 @@ The full list of events and what each carries is in the [extended description](d
 
 ## Getting started
 
-### Prerequisites
-
-* Docker, with Compose. That is all running the system needs.
-* JDK 21, to build and test outside Docker and to run the end to end check. No local Gradle install is needed, the wrapper is committed.
-
-### Installation
+Docker with Compose is all running the system needs. JDK 21 is needed to run the tests and the end to end checks; the Gradle wrapper is committed.
 
 ```sh
 git clone https://github.com/Amrovv/match3d.git
@@ -151,11 +143,7 @@ cd match3d
 docker compose up --build
 ```
 
-That builds both service images and starts them with PostgreSQL and RabbitMQ. Intake listens on localhost:8080 and matchmaking on localhost:8081. The RabbitMQ dashboard is at localhost:15672, as `guest`. `docker compose down` stops everything and keeps the data; `docker compose down -v` wipes it.
-
-### Usage
-
-The database starts empty, so register players first, then queue them. Ten players at the same rating form a lobby as soon as the tenth joins. A player who was never registered is refused as unknown.
+That starts both services with PostgreSQL and RabbitMQ: intake on localhost:8080, matchmaking on localhost:8081. The database starts empty, so register a player, then queue them:
 
 ```sh
 curl -X POST localhost:8081/players -H 'Content-Type: application/json' -d '{"id": "00000000-0000-0000-0000-000000000001"}'
@@ -163,79 +151,45 @@ curl -X POST localhost:8080/queue/join -H 'Content-Type: application/json' -d '{
 curl localhost:8080/queue/status/00000000-0000-0000-0000-000000000001
 ```
 
-| Endpoint | Does |
-|---|---|
-| `POST :8080/queue/join` | Queues one to five player ids as a solo or a party, `{"memberIds": [...]}`. Returns the entry id. |
-| `POST :8080/queue/leave` | Leaves by entry id, `{"entryId": "..."}`. |
-| `GET :8080/queue/status/{playerId}` | Queued with whether matchmaking is up and the estimated wait, matched with both teams, refused with the reason, or not queued. |
-| `POST :8081/players` | Registers a player at 2500 under the caller's id, `{"id": "..."}`. |
-| `GET :8081/players/{id}` | A player's current rating. |
-| `GET :8081/matches/{id}` | A formed match, both teams by player id. |
-| `GET :8081/players/{id}/history` | Every match a player was in, newest first. |
-| `POST :8081/matches/{id}/result` | Records the winner, `{"winner": "A"}`, or tosses a coin with no body. Winners gain 100, losers lose 100. |
+Ten players queued at the same rating form a lobby as soon as the tenth joins. `bash scripts/e2e-compose.sh` runs a full lobby from outside, then restarts everything and checks nothing was lost.
 
-The end to end check starts the stack, registers and queues ten players, reports a result, restarts the services and the database, and checks nothing was lost:
-
-```sh
-bash scripts/e2e-compose.sh
-```
-
-To run the services outside containers instead, with PostgreSQL and RabbitMQ on their usual ports, and each service in its own terminal:
-
-```sh
-docker run -d --name match3d-rabbit -p 5672:5672 -p 15672:15672 rabbitmq:4-management
-docker run -d --name match3d-postgres -p 5432:5432 -e POSTGRES_PASSWORD=match3d -v match3d-pgdata:/var/lib/postgresql/data postgres:17
-docker exec match3d-postgres createdb -U postgres matchmaking
-docker exec match3d-postgres createdb -U postgres intake
-export SPRING_DATASOURCE_PASSWORD=match3d
-./gradlew :intake-service:bootRun
-./gradlew :matchmaking-service:bootRun --args='--spring.profiles.active=local'
-```
-
-The password is not in the source, so each service reads it from `SPRING_DATASOURCE_PASSWORD` in its environment (on Windows PowerShell, `$env:SPRING_DATASOURCE_PASSWORD = "match3d"`). The `local` profile loads twenty players at 2500, with ids `00000000-0000-0000-0000-000000000001` to `...020`, so a lobby can be formed straight away.
-
-Each module's tests run on their own. The service tests need Docker running, and start a throwaway PostgreSQL of their own:
-
-```sh
-./gradlew :matchmaking-core:test
-./gradlew :intake-service:test
-./gradlew :matchmaking-service:test
-```
-
-Throughput under contention is measured separately, and is excluded from the normal build because a timing measurement is not a regression gate:
-
-```sh
-./gradlew :matchmaking-core:benchmark
-```
-
-The HTML report lands in `matchmaking-core/build/reports/tests/test/index.html`.
+The full API, running on Kubernetes, running without containers, and the tests and benchmark are all in [running the system](docs/running-the-system.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Deployment
 
-Every merge to `main`, once all tests pass, publishes both images to the GitHub Container Registry, tagged with the commit SHA and `latest`:
+Every merge to `main`, once all tests pass, publishes both images to the GitHub Container Registry as `ghcr.io/amrovv/match3d-intake` and `ghcr.io/amrovv/match3d-matchmaking`, tagged with the commit SHA and `latest`.
 
-```sh
-docker pull ghcr.io/amrovv/match3d-intake:latest
-docker pull ghcr.io/amrovv/match3d-matchmaking:latest
-```
+### Kubernetes
 
-The system currently runs in Docker Compose on one machine. Kubernetes, first on minikube and then on AWS, is not built yet.
+Intake is the front door, so one copy of it would be a single point of failure and a ceiling on how many players the system can take in. It runs as several interchangeable copies instead, which only works because it keeps no state in memory. The system is built to run across many machines, so Kubernetes is used to simulate a multi server deployment locally: minikube runs a three node cluster on one machine, each node standing in for a server, and the design's distributed claims are tested against it. Kubernetes keeps the system in shape as it runs: it replaces a copy that dies, sends players only to copies that can reach their database and RabbitMQ, and never runs two matchmaking engines at once. The same manifests in `k8s/` would run on a cloud cluster, with only addresses, the password and image names changed.
+
+| | intake | matchmaking |
+|---|---|---|
+| Copies | Three, one per server | One |
+| Why | It keeps no state in memory, so any copy serves any player | The engine's queue is one process's memory, and two engines would split it |
+| Replaced | One copy at a time, never fewer than three | Stopped first, so two engines never run at once |
+| Health | Gets players only while its database and RabbitMQ answer | The same |
+
+Tested against the running cluster:
+
+* **Every copy serves.** At three, two and one copies, players pass through all of them with none lost or queued twice, even when one player joins through every copy at once.
+* **A killed copy costs nobody.** An intake copy deleted while players are joining loses no player, and the cluster replaces it by itself.
+* **Nothing is lost on restart.** Both services, PostgreSQL and RabbitMQ restarted, every player, match and rating still there.
+
+The cluster shares one machine, so a node stands in for a server rather than being one, and it is brought up by hand rather than deployed from CI. How it works is in the [extended description](docs/project-extended-description.md#running-on-kubernetes), why each choice was made is in [design choices](docs/design-choices.md#running-on-kubernetes), and how to run it is in [running the system](docs/running-the-system.md#running-it-on-kubernetes).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-## Roadmap
+## Future work
 
-- [x] Milestone 0, repo, CI, and the branch to pull request workflow
-- [x] Milestone 1, core engine, skill index, fairness heap, and matching algorithm
-- [x] Milestone 2, concurrency, the race reproduced and fixed
-- [x] Milestone 3, parties, queued as one entry and always placed on one team of five
-- [x] Milestone 4, split into two services over RabbitMQ, REST API
-- [x] Milestone 5, PostgreSQL persistence, rating updates from results, and recovery from either service restarting
-- [x] Milestone 6, Docker images, Compose, an end to end check, and images published from CI
-- [ ] Milestone 7, Kubernetes manifests, proven against minikube
-- [ ] Milestone 8, deployment to AWS, k3s on EC2 with RDS, and the delivery step in CI
+The system is complete as it stands. These are the natural next steps.
+
+* **A cloud deployment.** The same manifests on a small cluster in the cloud, such as k3s on one server, with a managed PostgreSQL, and a step in CI that deploys each merged build. Only addresses, the Secret and image names would change.
+* **Matchmaking across several processes.** Splitting the queue by rating band, one engine per band, so matchmaking scales out the way intake already does.
+* **Ratings that weigh the opponent.** An Elo style update in place of the flat 100.
+* **Keeping failed messages.** A dead letter queue, so a message a service cannot handle is kept for inspection rather than dropped.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -248,7 +202,7 @@ The ones that matter most. The [full list](docs/project-extended-description.md#
 * **Ratings are simple.** A result moves every player by a flat 100, whoever they played.
 * **Rare crashes leave loose ends.** A crash at the wrong moment can leave a match that is never resulted, or a player shown as matched after their match ended.
 * **Tuning is not measured.** How fast the rating window widens is chosen, not derived from real players, and only throughput is benchmarked.
-* **Not deployed yet.** The system runs in Docker Compose on one machine, with a password kept in the repository. Kubernetes and AWS come next.
+* **One machine.** The Kubernetes cluster is minikube, three nodes on one machine, with PostgreSQL and RabbitMQ outside it as single instances. It shows orchestration, not a production deployment, and nothing deploys automatically.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -309,5 +263,7 @@ Project link: [https://github.com/Amrovv/match3d](https://github.com/Amrovv/matc
 [testcontainers-url]: https://testcontainers.com/
 [docker-shield]: https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white
 [docker-url]: https://www.docker.com/
+[kubernetes-shield]: https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white
+[kubernetes-url]: https://kubernetes.io/
 [actions-shield]: https://img.shields.io/badge/GitHub%20Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white
 [actions-url]: https://github.com/features/actions
