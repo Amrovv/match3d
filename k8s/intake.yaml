@@ -83,7 +83,11 @@ kind: Service
 metadata:
   name: intake
 spec:
-  type: NodePort
+  # LoadBalancer, not NodePort: on the Docker driver a NodePort is not
+  # reachable from the host, so `minikube tunnel` assigns each service a
+  # stable external IP. It is also what a real cloud deployment fronts the
+  # service with. The Service still spreads requests across all three copies.
+  type: LoadBalancer
   selector:
     app: intake
   ports:

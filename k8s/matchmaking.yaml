@@ -68,7 +68,9 @@ kind: Service
 metadata:
   name: matchmaking
 spec:
-  type: NodePort
+  # LoadBalancer, not NodePort: on the Docker driver a NodePort is not
+  # reachable from the host, so `minikube tunnel` assigns a stable external IP.
+  type: LoadBalancer
   selector:
     app: matchmaking
   ports:

@@ -35,6 +35,7 @@ echo "== waiting for both rollouts"
 kubectl rollout status deployment/intake
 kubectl rollout status deployment/matchmaking
 
-echo "== up. Service URLs:"
-minikube service intake --url
-minikube service matchmaking --url
+echo "== up. The services are LoadBalancer type; run 'minikube tunnel' in"
+echo "   another terminal (it needs admin) to give them external IPs, then:"
+echo "     kubectl get svc intake matchmaking"
+echo "   intake answers on its EXTERNAL-IP:8080, matchmaking on :8081."
