@@ -3,6 +3,9 @@ services:
     image: postgres:17
     environment:
       POSTGRES_PASSWORD: match3d
+    # Published so minikube's pods can reach it as a server outside the cluster.
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres:/docker-entrypoint-initdb.d:ro
@@ -17,6 +20,7 @@ services:
   rabbitmq:
     image: rabbitmq:4-management
     ports:
+      - "5672:5672"
       - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
@@ -30,6 +34,7 @@ services:
       dockerfile: intake-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/intake
+      SPRING_DATASOURCE_PASSWORD: match3d
       SPRING_RABBITMQ_HOST: rabbitmq
     ports:
       - "8080:8080"
@@ -46,6 +51,7 @@ services:
       dockerfile: matchmaking-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/matchmaking
+      SPRING_DATASOURCE_PASSWORD: match3d
       SPRING_RABBITMQ_HOST: rabbitmq
     ports:
       - "8081:8081"

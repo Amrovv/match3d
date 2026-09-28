@@ -6,21 +6,164 @@ Only built work appears here. New sections go at the top as they land, so the mo
 
 ## Contents
 
-1. [Containers and delivery](#containers-and-delivery)
-2. [Persistence and recovery](#persistence-and-recovery)
-3. [Two services over a queue](#two-services-over-a-queue)
-4. [Parties and teams](#parties-and-teams)
-5. [Matching under contention](#matching-under-contention)
-6. [Forming a lobby](#forming-a-lobby)
-7. [The consent check](#the-consent-check)
-8. [The skill index](#the-skill-index)
-9. [Fairness and the widening window](#fairness-and-the-widening-window)
-10. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
-11. [The domain model](#the-domain-model)
-12. [Cost of each operation](#cost-of-each-operation)
-13. [Verification](#verification)
-14. [The build and the pipeline](#the-build-and-the-pipeline)
-15. [Limitations](#limitations)
+1. [Running on Kubernetes](#running-on-kubernetes)
+2. [Containers and delivery](#containers-and-delivery)
+3. [Persistence and recovery](#persistence-and-recovery)
+4. [Two services over a queue](#two-services-over-a-queue)
+5. [Parties and teams](#parties-and-teams)
+6. [Matching under contention](#matching-under-contention)
+7. [Forming a lobby](#forming-a-lobby)
+8. [The consent check](#the-consent-check)
+9. [The skill index](#the-skill-index)
+10. [Fairness and the widening window](#fairness-and-the-widening-window)
+11. [Drawing candidates in wait time order](#drawing-candidates-in-wait-time-order)
+12. [The domain model](#the-domain-model)
+13. [Cost of each operation](#cost-of-each-operation)
+14. [Verification](#verification)
+15. [The build and the pipeline](#the-build-and-the-pipeline)
+16. [Limitations](#limitations)
+
+## Running on Kubernetes
+
+The same two images that run under Compose also run on a Kubernetes cluster, minikube, with three nodes standing in for three servers. Intake runs as three copies, one on each node, and matchmaking runs as one. PostgreSQL and RabbitMQ stay outside the cluster.
+
+**Why several copies of intake.** Intake is the front door, taking every join, leave and status check. As one copy it would be a single point of failure, where a crash stops anyone queueing, and a fixed ceiling on how many players can come in. As several, any copy can fail while the rest carry on, and capacity grows by adding copies rather than a bigger machine. This was designed in before any cluster existed: intake keeps nothing in memory, so every copy is interchangeable, and races between copies are settled by their shared database.
+
+**Why it runs on Kubernetes.** The system is a distributed one by design: two services sharing only a message queue, one of them made of interchangeable copies. It is built to run across many machines, and Kubernetes is used to simulate that locally: minikube runs a three node cluster on one machine, each node standing in for a server, and the design is tested against it. Until then, "any intake copy can serve any player" and "losing a copy loses no player" were arguments. Here they are checked against the running system, along with the cluster replacing a copy that dies without anyone stepping in.
+
+While it runs, Kubernetes holds the system to the shape described in the manifests: three intake copies on three different servers, exactly one matchmaking, traffic only to copies that can reach their database and RabbitMQ, and never two engines at once, even during an update.
+
+The same manifests are what a cloud Kubernetes cluster would take, so moving there changes addresses, the database password and image names, not the design, and PostgreSQL and RabbitMQ already sit outside the cluster. Three copies is the smallest number that leaves two running after one fails, one per server; it is not sized to a measured load.
+
+### What runs where
+
+```mermaid
+flowchart LR
+    client(["Client on the host"])
+
+    subgraph cluster["minikube cluster"]
+        direction TB
+        subgraph n1["node 1"]
+            i1["intake"]
+            m1["matchmaking"]
+        end
+        subgraph n2["node 2"]
+            i2["intake"]
+        end
+        subgraph n3["node 3"]
+            i3["intake"]
+        end
+        isvc{{"intake Service<br/>:8080"}}
+        msvc{{"matchmaking Service<br/>:8081"}}
+        isvc --> i1 & i2 & i3
+        msvc --> m1
+    end
+
+    subgraph outside["Outside the cluster, in Compose"]
+        pg[("PostgreSQL")]
+        mq[["RabbitMQ"]]
+    end
+
+    client -->|"minikube tunnel"| isvc
+    client -->|"minikube tunnel"| msvc
+    cluster -->|"host.minikube.internal"| outside
+```
+
+A client reaches each service through one address, `localhost:8080` for intake and `localhost:8081` for matchmaking, the same as under Compose, and the intake Service passes each connection to one of the three copies. Every copy reads and writes the same intake database, and the one matchmaking copy owns the engine. PostgreSQL and RabbitMQ are kept outside the cluster as independent services, so the cluster holds only intake and matchmaking. Which node matchmaking is placed on is the cluster's choice.
+
+| File | Holds |
+|---|---|
+| `k8s/configmap.yaml` | RabbitMQ's address and each service's database URL. |
+| `k8s/intake.yaml` | intake: three copies spread one per node, their health checks, and the Service in front of them. |
+| `k8s/matchmaking.yaml` | matchmaking: one copy, replaced by stopping it first, and its Service. |
+
+### How the copies are arranged
+
+Intake keeps nothing in memory. Who is queued, matched or refused lives in its database, so any copy can answer any player, and a copy that dies takes nothing with it but the requests it was serving at that moment. Its copies sit one per node, so a server going down would take one of them, and an update starts a new copy before stopping an old one, so there are always three.
+
+Matchmaking cannot be copied. The engine's queue lives in one process's memory, and RabbitMQ hands each join to exactly one consumer, so two copies would each hold about half the queue and could never put a player from one half in a lobby with a player from the other. So there is one copy, and whenever it is replaced the old one is stopped before the new one starts. Two engines never run at once.
+
+### When an intake copy dies
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as intake Service
+    participant I1 as intake copy 1
+    participant I2 as intake copy 2
+    participant D as intake database
+    participant K as Kubernetes
+
+    C->>S: POST /queue/join
+    S->>I1: passed to copy 1
+    Note over I1: copy 1 is killed
+    I1--xC: connection fails
+    C->>S: the same join, retried
+    S->>I2: passed to copy 2
+    I2->>D: claim the player
+    I2-->>C: 202, entry id
+    K->>K: two copies where three are wanted
+    K->>K: starts a replacement
+```
+
+The retry is safe because of how joins were already built: the same members joining again get their existing entry sent again, never a second one, and if copy 1 had committed the join before dying, copy 2 finds it in the shared database. Anything copy 1 had in progress but never published is picked up by the sweeper, which every copy runs. Kubernetes notices it is a copy short and starts a new one without being told.
+
+### When matchmaking is replaced
+
+```mermaid
+sequenceDiagram
+    participant I as intake copies
+    participant Q as RabbitMQ
+    participant M1 as old matchmaking
+    participant M2 as new matchmaking
+
+    Note over M1: stopped first, the engine's memory is gone
+    I->>Q: joins keep arriving and wait on the queue
+    Note over I: status reads down after 30 seconds without a heartbeat
+    Note over M2: started once the old one is gone
+    M2->>Q: MatchmakingStarted
+    Q->>I: MatchmakingStarted
+    I->>Q: every queued entry again, with its original queue time
+    Q->>M2: joins, rebuilt into a fresh engine
+```
+
+The few seconds with no matchmaking are the same situation as a matchmaking crash, which the system already recovers from: intake still holds every queued player, and the new copy's announcement makes one intake copy send them all again. Nobody loses their place in the queue, since each entry keeps its original queue time and so its widened rating window.
+
+### Several copies, one player
+
+A player whose join reaches two copies at once, a double click or a retry that races the original, is still queued once. The copies share one database, and a join claims each member with a single conditional SQL statement that succeeds only if the player is not queued already. PostgreSQL locks the row while it writes, so one claim wins and every other copy's attempt finds the player taken, rolls back, and answers 409. This is the same statement that settled racing joins inside one intake; with several copies, the database is the only place a race between them can be settled.
+
+### Configuration, the password and health
+
+Each copy gets its database URL and RabbitMQ's address from the ConfigMap, and the database password from a Secret the setup script creates, so the password is in no source file. The same variables are set under Compose and for a local run, so one image runs everywhere.
+
+Both services report two kinds of health. Liveness answers whether the process is working at all, and a copy that fails it is restarted. Readiness also checks the database and RabbitMQ, and a copy that fails it stops receiving players until they come back, without being restarted. The split matters here because an outage of the shared database would fail every copy at once: restarting them all would fix nothing, while taking them out of the Service turns players away quickly and lets the copies return by themselves.
+
+### Bringing it up
+
+`scripts/minikube-up.sh` builds the system from nothing: it starts the three node cluster and PostgreSQL and RabbitMQ in Compose, builds both images on the host machine and loads them into every node, creates the Secret, applies the manifests, and waits until every copy is ready. Each build gets a new image tag, the short commit SHA, so rolling out new code is running the script again. `minikube tunnel`, in a terminal of its own, gives the two Services their addresses on the host machine.
+
+### Checks on the cluster
+
+The same `e2e-tests` module that checks Compose checks the cluster, from outside and over HTTP only. Each check has a wrapper script that does the part only the cluster knows how to do: restarting, scaling or killing.
+
+| Script | Does | Shows |
+|---|---|---|
+| `scripts/e2e-minikube.sh` | Runs the end to end flow, restarts both services and PostgreSQL and RabbitMQ, then runs the after restart phase. | The system behaves the same on the cluster as under Compose, and its data survives everything restarting. |
+| `scripts/e2e-minikube-replicas.sh` | Runs `ReplicaTest` with intake at three copies, then two, then one. | Every running copy takes players, a full flow through them loses and duplicates nobody, and a player joining through every copy at once is queued once. |
+| `scripts/e2e-minikube-disruption.sh` | Runs `DisruptionTest` and deletes an intake copy while its players are joining. | A copy killed under load costs no player, and the cluster replaces it. |
+
+Every intake response carries an `X-Intake-Pod` header naming the copy that served it, which is how `ReplicaTest` counts copies while still going through the one address every client uses. It opens a new connection for each request it counts with, since the Service spreads connections rather than requests. It fails if more copies answer than are running, which would mean a removed copy was still taking players.
+
+`DisruptionTest` writes a marker file once its players start joining, and the wrapper waits for that file before deleting a copy, so the kill always meets a running flow. Each request is retried up to three times, and the test passes only if all ten players end up matched, rated and in their history.
+
+Removing copies by scaling down and by deleting them answer different questions. Scaling down leaves a steady count for `ReplicaTest` to check against. Deleting is a crash, and shows the replacement.
+
+Both services finish requests already in progress when told to stop, for up to 20 seconds, and new versions are deployed in a maintenance window. A copy killed without warning is harsher than a planned stop, so surviving it covers the gentler case too.
+
+### What the cluster stands for
+
+The cluster runs the same Kubernetes, and takes the same manifests, as a hosted one, so the copies, health checks, replacement and update behaviour are all exercised in full. Its three nodes share one machine, though, so a node stands in for a server rather than being one, and PostgreSQL and RabbitMQ are single instances beside it. Moving to a hosted cluster would change addresses, the Secret and image names, not the design.
 
 ## Containers and delivery
 
@@ -38,12 +181,14 @@ Gradle's download cache sits on a BuildKit cache mount, a folder Docker keeps be
 
 | Container | Image | Reached from the host at |
 |---|---|---|
-| `postgres` | `postgres:17` | not published |
-| `rabbitmq` | `rabbitmq:4-management` | the dashboard, localhost:15672 |
+| `postgres` | `postgres:17` | localhost:5432 |
+| `rabbitmq` | `rabbitmq:4-management` | localhost:5672, and the dashboard at localhost:15672 |
 | `intake` | built from `intake-service/Dockerfile` | localhost:8080 |
 | `matchmaking` | built from `matchmaking-service/Dockerfile` | localhost:8081 |
 
-Inside the network a container is reached by its service name, and `localhost` means the container itself. So each service is given `SPRING_DATASOURCE_URL` and `SPRING_RABBITMQ_HOST` naming `postgres` and `rabbitmq`, which Spring reads over `application.properties`, and the same jar runs inside a container or out of one.
+PostgreSQL and RabbitMQ are published on the host so that the Kubernetes cluster, which runs beside Compose rather than inside it, can reach them too.
+
+Inside the network a container is reached by its service name, and `localhost` means the container itself. So each service is given `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_PASSWORD` and `SPRING_RABBITMQ_HOST`, naming `postgres` and `rabbitmq`, which Spring reads over `application.properties`, and the same jar runs inside a container or out of one.
 
 Postgres keeps its data in the named volume `pgdata`, so stopping or removing the containers keeps every player and match, and `docker compose down -v` is what wipes it. The first start of an empty volume runs `docker/postgres/create-databases.sql`, creating one database per service. Each service then creates its tables through Flyway. Nothing is seeded: players are registered through `POST /players`, as any client would.
 
@@ -152,6 +297,8 @@ With no heartbeat for 30 seconds, or none ever, status reads `"matchmaking": "DO
 ## Two services over a queue
 
 The engine runs inside `matchmaking-service`. Players reach it through `intake-service`. Each has its own database, and they never call each other: everything between them is an event on RabbitMQ.
+
+The split follows two opposite needs. Intake is where every player arrives, and it takes the bulk of the traffic: joins, leaves, and status checks repeated for as long as a player waits. It has to stay up and grow with the number of players, so it keeps nothing in memory and runs as any number of copies. The engine has to see the whole queue at once to match fairly, and keeps it in memory to match quickly, so it runs as one process. Putting a queue between them means neither waits on the other: intake answers a join as soon as it is recorded, matchmaking works through joins at its own pace, and either can restart while the other keeps going.
 
 ```mermaid
 sequenceDiagram
@@ -607,6 +754,8 @@ Both services were also run together against a real Postgres and RabbitMQ: a par
 
 The whole system in containers is checked by the end to end test, run with `scripts/e2e-compose.sh` from an empty database: both phases pass, and the after restart phase was confirmed to fail once the volume was wiped between them.
 
+On the three node minikube cluster, all three wrapper scripts pass: the end to end flow and its after restart phase, the replica checks at three, two and one intake copies, and the flow with an intake pod deleted under it. The health checks were checked by hand under Compose: with RabbitMQ stopped, both services answered 503 for readiness and 200 for liveness, and returned to 200 once it was back.
+
 ## The build and the pipeline
 
 One Gradle build over five modules. `matchmaking-core` depends on nothing. `common` holds the types both services share. Both services depend on `common`, and `matchmaking-service` also on `matchmaking-core`. Nothing depends on a service, so the engine compiles and tests with no framework on the classpath. `e2e-tests` depends on no other module and speaks to the services over HTTP only.
@@ -641,8 +790,12 @@ The README lists the ones that matter most. This is all of them, by the part of 
 | Queue | A party refused for an unknown member is not told which member it was. |
 | Queue | Joining a party while already queued is refused rather than moving the player into it. |
 | Queue | Wait estimates count matched players only, since leavers are never recorded. They use rating bands of 100, so plus or minus 500 is approximate at its edges, and a party is estimated from solos and parties alike, which likely flatters it. |
-| Deployment | The system runs in Compose on one machine. Kubernetes and a cloud deployment are not built yet. |
-| Deployment | The Postgres password is in the repository, in `application.properties` and the Compose file. It suits a local setup only. |
+| Deployment | The Kubernetes cluster is minikube: three nodes sharing one machine. It shows orchestration, copies, health checks and recovery, but not separate machines or a real network between them. |
+| Deployment | PostgreSQL and RabbitMQ run outside the cluster as single instances. Their availability is assumed, and no test covers either failing while on the cluster. |
+| Deployment | Nothing deploys automatically. CI tests and publishes images, and a person brings the cluster up with the setup script, from images built locally. |
+| Deployment | Updates are planned for a maintenance window. Intake's Deployment updates one copy at a time, but whether that drops any request is not tested. |
+| Deployment | Matchmaking is replaced by stopping it first, so every update or restart leaves a few seconds with no matching. |
+| Deployment | The Secret is stored unencrypted inside the cluster, which is the Kubernetes default, and the throwaway local password `match3d` is committed in the Compose file and the setup script. |
+| Deployment | Every intake response names its pod in `X-Intake-Pod`, which is there for the tests and is to be removed before any public deployment. |
 | Deployment | The runtime image keeps a shell for debugging, at the cost of size and of tools an attacker could use. A distroless Java image is the next step. |
-| Deployment | The services have no health endpoint, so Compose starts them without checking they are ready, and the end to end script decides they are up by asking each a question it can answer. |
 | Deployment | Each image build in CI downloads every library again, since nothing is cached between runs. |

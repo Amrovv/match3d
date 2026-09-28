@@ -1,0 +1,16 @@
+# Non-secret configuration both services read. The password is not here; it
+# lives in a Secret created by scripts/minikube-up.sh and never committed.
+#
+# The database and broker run outside the cluster (see notes milestone 7), so
+# pods reach them at host.minikube.internal, the address minikube gives the
+# host from inside a node.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: match3d-config
+data:
+  SPRING_RABBITMQ_HOST: host.minikube.internal
+  # One key per service, since the two use different databases on the same
+  # server. Each Deployment maps the key it needs onto SPRING_DATASOURCE_URL.
+  INTAKE_DATASOURCE_URL: jdbc:postgresql://host.minikube.internal:5432/intake
+  MATCHMAKING_DATASOURCE_URL: jdbc:postgresql://host.minikube.internal:5432/matchmaking
