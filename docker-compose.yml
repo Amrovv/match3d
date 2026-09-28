@@ -34,6 +34,7 @@ services:
       dockerfile: intake-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/intake
+      SPRING_DATASOURCE_PASSWORD: match3d
       SPRING_RABBITMQ_HOST: rabbitmq
     ports:
       - "8080:8080"
@@ -50,6 +51,7 @@ services:
       dockerfile: matchmaking-service/Dockerfile
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/matchmaking
+      SPRING_DATASOURCE_PASSWORD: match3d
       SPRING_RABBITMQ_HOST: rabbitmq
     ports:
       - "8081:8081"

@@ -187,11 +187,12 @@ docker run -d --name match3d-rabbit -p 5672:5672 -p 15672:15672 rabbitmq:4-manag
 docker run -d --name match3d-postgres -p 5432:5432 -e POSTGRES_PASSWORD=match3d -v match3d-pgdata:/var/lib/postgresql/data postgres:17
 docker exec match3d-postgres createdb -U postgres matchmaking
 docker exec match3d-postgres createdb -U postgres intake
+export SPRING_DATASOURCE_PASSWORD=match3d
 ./gradlew :intake-service:bootRun
 ./gradlew :matchmaking-service:bootRun --args='--spring.profiles.active=local'
 ```
 
-The `local` profile loads twenty players at 2500, with ids `00000000-0000-0000-0000-000000000001` to `...020`, so a lobby can be formed straight away.
+The password is not in the source, so each service reads it from `SPRING_DATASOURCE_PASSWORD` in its environment (on Windows PowerShell, `$env:SPRING_DATASOURCE_PASSWORD = "match3d"`). The `local` profile loads twenty players at 2500, with ids `00000000-0000-0000-0000-000000000001` to `...020`, so a lobby can be formed straight away.
 
 Each module's tests run on their own. The service tests need Docker running, and start a throwaway PostgreSQL of their own:
 
